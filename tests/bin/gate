@@ -1,0 +1,4 @@
+#!/bin/sh
+echo "waiting on $1" >&2
+while [ ! -e "$1" ]; do sleep 0.05; done
+cat "$1"

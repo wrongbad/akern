@@ -1,0 +1,4 @@
+#!/bin/sh
+echo "sleeping ${1:-1}" >&2
+sleep "${1:-1}"
+echo "slept ${1:-1} seconds"
