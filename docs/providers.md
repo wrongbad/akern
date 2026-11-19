@@ -3,15 +3,15 @@
 The API between the kernel and `providers/`: one program per model backend,
 run once per request. A provider turns the kernel's request into a model
 response; the kernel never speaks HTTP. Stream conventions (JSON lines, unknown
-fields ignored, `x-` names): [akern-loop.md](akern-loop.md#conventions).
+fields ignored, `x-` names): [akern.md](akern.md#conventions).
 
 ## 1. Finding and running a provider
 
 | Step | Rule |
 |---|---|
 | name | `-m provider/model` (or `AKERN_MODEL`, or `set`): the part before the first `/` is the provider, the rest the request's `model` (`""` when there is no `/`) |
-| lookup | `$AKERN_HOME/providers/<provider>`, which must be executable. A name starting with `.` is never run. Not found: `error` `{"where":"provider","message":"no provider for <model> in <home>/providers"}` and the run ends `error` |
-| spawn | once per turn, with no arguments, in its own process group, in the kernel's working directory; environment as for every child ([akern-loop.md §1](akern-loop.md#set-for-children)) |
+| lookup | `$AKERN_HOME/providers/<provider>`, then `$AKERN_HOME/system/providers/<provider>`; the first which must be executable. A name starting with `.` is never run. Not found: `error` `{"where":"provider","message":"no provider for <model> in <home>/providers or <home>/system/providers"}` and the run ends `error` |
+| spawn | once per turn, with no arguments, in its own process group, in the kernel's working directory; environment as for every child ([akern.md §1](akern.md#set-for-children)) |
 | stdin | the request (§2), then EOF |
 | stdout | events and one terminal line (§3); each valid line other than `result` is forwarded to the kernel's stdout as written |
 | stderr | each line becomes a `notice` event with `source: provider` |
@@ -37,7 +37,7 @@ One JSON object on stdin:
 |---|---|
 | `model` | string; the part of `provider/model` after the `/` |
 | `system` | the system prompt file's contents, read for every request; `null` when it cannot be read |
-| `messages` | the context: the `message` of each `message` entry from the session's head back to a root, oldest first ([akern-loop.md §5](akern-loop.md#session-file)); shape in §5 |
+| `messages` | the context: the `message` of each `message` entry from the session's head back to a root, oldest first ([akern.md §5](akern.md#session-file)); shape in §5 |
 | `tools` | the built-in tool definitions, `{name, description, input_schema}` ([tools.md §1](tools.md#1-built-in-tools)) |
 | `params` | object from `-P` and `set`; the provider defines its keys and ignores the rest |
 
@@ -115,7 +115,7 @@ lines, never the exit status.
 | `inner` | index into that block's `content` (a `tool_result` or `job_result`); absent for a block of the message itself |
 
 The kernel then swaps that block for a note in the session and sends the
-request again ([akern-loop.md: error](akern-loop.md#error)). Apart from that,
+request again ([akern.md: error](akern.md#error)). Apart from that,
 the kernel never retries: retrying a model call is the provider's decision,
 retrying a run the front end's.
 

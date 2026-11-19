@@ -1,7 +1,7 @@
 # Design
 
 Why akern is shaped the way it is. The contracts themselves are in the API
-docs: [akern-loop.md](akern-loop.md) (the process), [kernel.md](kernel.md)
+docs: [akern.md](akern.md) (the process), [kernel.md](kernel.md)
 (its modules), [providers.md](providers.md) and [tools.md](tools.md).
 
 ## What this is
@@ -50,7 +50,7 @@ and messages that interrupt a turn are part of the kernel from the start.
 3. **The conversation is serial; the work is concurrent.** One model request in
    flight per session, since two requests from one head would fork the
    conversation. Everything the model launches runs alongside it. Parallelism
-   across conversations is more kernels: a sub-agent is another `akern-loop`
+   across conversations is more kernels: a sub-agent is another `akern`
    on another session file.
 4. **Nothing blocks the loop.** A permission prompt in a shim or a
    ten-minute build stalls only its own call.
@@ -71,8 +71,8 @@ and messages that interrupt a turn are part of the kernel from the start.
    markers) intact for free.
 9. **Discovery by `PATH` and one directory.** Put an `akern-*` tool on `PATH`
    and it can be used. Drop a provider in `~/.akern/providers/` and the next
-   request can use it. The system prompt is a file, `~/.akern/system.md`. No
-   registry, no manifest, no reload command.
+   request can use it. The system prompt is a file, `~/.akern/system.md`, else
+   `~/.akern/system/system.md`. No registry, no manifest, no reload command.
 10. **Fail closed.** A broken permission gate must never mean "allowed": a shim
     that crashes runs nothing, and a sandbox that fails to start starts no kernel.
 11. **If the model can do it, we don't ship it.** The system provides only
@@ -85,7 +85,7 @@ and messages that interrupt a turn are part of the kernel from the start.
     in the kernel, because once output is in the context it is too late.
 12. **The command line is the interface, for the model too.** Every other
     capability is a program on `PATH` plus a skill that says how to call it
-    (`akern-loop -p` for a sub-agent, `akern-edit` to change a file,
+    (`akern -p` for a sub-agent, `akern-edit` to change a file,
     `gh`, a project's scripts). A capability added for people is automatically
     available to the model, and the reverse. No wrappers: a wrapper exists
     only because an API is missing, so fix the API instead.
@@ -107,7 +107,7 @@ and messages that interrupt a turn are part of the kernel from the start.
     skills. Naming a sibling couples them; any program must be replaceable
     without another's text going stale.
 16. **Docs mirror directories and executables.** One reference doc per
-    directory or executable: [akern-loop.md](akern-loop.md) for the kernel
+    directory or executable: [akern.md](akern.md) for the kernel
     process, [kernel.md](kernel.md) for `src/`, [providers.md](providers.md)
     for `providers/`, [tools.md](tools.md) for `tools/` and `skills/`. Every
     fact lives in one place; other docs link to it.
@@ -122,13 +122,13 @@ and messages that interrupt a turn are part of the kernel from the start.
 
 | Seam | Contract |
 |---|---|
-| Front end: whatever drives the kernel | commands on stdin, events on stdout: [akern-loop.md](akern-loop.md) |
+| Front end: whatever drives the kernel | commands on stdin, events on stdout: [akern.md](akern.md) |
 | Provider: request in, response out | [providers.md](providers.md) |
 | Tools: `exec`, `read`, `write`, and programs on `PATH` | [tools.md](tools.md) |
 
 The front end's pipes are the kernel's only channels. Whoever starts a kernel
 owns the conversation with it, and the pipes along the process tree are enough:
-a person types into the terminal `akern` runs in, a parent agent `write`s to its
+a person types into the terminal `akern-cli` runs in, a parent agent `write`s to its
 sub-agent's stdin pipe. There is no control socket. What that gives up, on
 purpose: attaching a second UI to an agent already running elsewhere (run it in
 tmux; a separate relay program could add it later without kernel changes), and
@@ -147,12 +147,13 @@ skills, compaction, permissions, config files.
 One rule decides where a thing lives: **what people and the model run is on
 `PATH`; what the kernel starts is in `AKERN_HOME`** (default `~/.akern`; the
 variable exists for development and tests). Layout:
-[akern-loop.md §5](akern-loop.md#home), [tools.md §3](tools.md#install).
+[akern.md §5](akern.md#home), [tools.md §3](tools.md#install).
 
 Providers are kept off `PATH` on purpose. One is never run by hand (it reads a
 request on stdin), and it is trusted with a lot: it sees the whole conversation
 and holds an API key. Installing a program must never change which model
-backends exist. `ls ~/.akern/providers` answers "which models can I use".
+backends exist. `ls ~/.akern/providers ~/.akern/system/providers` answers
+"which models can I use".
 
 A **package** is some tools plus, optionally, providers and skills: put the
 tools on `PATH` and copy the rest into `AKERN_HOME`. `make install` does exactly
@@ -170,12 +171,12 @@ that for this repository.
 | Which calls go to the background | the model (`"wait": false` on the call) |
 | Output redaction, summarizing | a shim on `PATH` (the size cap is `exec`'s `stdout_limit`) |
 | Compaction, fork, tree, export, session listing | commands (`akern-*`) |
-| Sub-agents | another `akern-loop -p`, run through `exec`; the kernel only counts down `AKERN_RECURSION_LIMIT` |
+| Sub-agents | another `akern -p`, run through `exec`; the kernel only counts down `AKERN_RECURSION_LIMIT` |
 | Job control for the model | the `tool_pending`'s pid and files, worded by the provider; `tail` and `kill` through `exec`; `write {job}` for input; to wait, end the turn |
 | Steering | a person types into the terminal; a parent `write`s a line to its sub-agent's job |
 | Shells, file editing, state between calls | the model, using whatever is installed |
-| Settings files, model aliases | the `akern` front end and frontends |
-| Rendering, key bindings, themes, editors | frontends; `akern`'s display is `$AKERN_HOME/render.jq` |
+| Settings files, model aliases | the `akern-cli` front end and frontends |
+| Rendering, key bindings, themes, editors | frontends; `akern-cli`'s display is `$AKERN_HOME/render.jq`, else `$AKERN_HOME/system/render.jq` |
 | MCP, plan mode, todos | commands, skills, providers and frontends |
 
 ## No interception points
@@ -241,7 +242,7 @@ run any tool with your privileges. Safety is composed:
 - or run the whole thing inside a container, VM or OS sandbox. One process
   tree with one working directory is easy to confine, and only this covers
   `read` and `write`, which run in the kernel and pass no shim. It needs no
-  kernel change: the front end starts `akern-loop` inside the container
+  kernel change: the front end starts `akern` inside the container
   (`docker run -i …`), and the pipes cross the boundary like any other.
 
 Only the process that started a kernel can drive it: there is no listening

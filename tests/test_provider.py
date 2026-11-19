@@ -1,3 +1,6 @@
+from conftest import BUILD
+
+
 def answer(text):
     return {"type": "result", "stop": "end_turn", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
 
@@ -26,11 +29,21 @@ def test_provider_stderr_lines_are_notices_from_the_provider(kernel, home):
     assert run.events_of("notice") == [{"type": "notice", "source": "provider", "message": "warming up"}]
 
 
-def test_the_system_prompt_is_system_md_in_akern_home_unless_s_names_a_file(kernel, home, tmp_path):
+def test_a_provider_in_akern_home_shadows_the_one_of_the_same_name_in_system(kernel, home):
+    kernel("hi", env=home.env)
+    (home.dir / "providers" / "mock").unlink()
+    run = kernel("hi", env=home.env)
+    assert len(home.requests) == 1
+    assert run.events_of("run_end")[0]["reason"] == "done"
+
+
+def test_the_system_prompt_is_system_md_in_akern_home_then_in_system_unless_s_names_a_file(kernel, home, tmp_path):
     (home.dir / "system.md").write_text("from home")
     (tmp_path / "chosen.md").write_text("chosen")
     kernel("hi", env=home.env)
     kernel("hi", "-S", "chosen.md", env=home.env)
     (home.dir / "system.md").unlink()
     kernel("hi", env=home.env)
-    assert [r["system"] for r in home.requests] == ["from home", "chosen", None]
+    (home.dir / "system" / "system.md").unlink()
+    kernel("hi", env=home.env)
+    assert [r["system"] for r in home.requests] == ["from home", "chosen", (BUILD / "system" / "system.md").read_text(), None]

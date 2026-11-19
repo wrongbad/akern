@@ -1,4 +1,4 @@
-# akern-loop
+# akern
 
 The kernel as a command: what it reads, what it writes, and the files it
 keeps. How it behaves inside (delivery modes, the wake rule, jobs) is
@@ -25,8 +25,8 @@ session file.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AKERN_HOME` | `$HOME/.akern` (`./.akern` without `HOME`) | holds `providers/<name>` and `system.md` |
-| `AKERN_MODEL` | none | `provider/model` when `-m` is absent. Neither given: exit 2. The kernel never reads `$AKERN_HOME/model`; the `akern` front end turns it into this variable ([tools.md §4](tools.md#4-the-akern-front-end)) |
+| `AKERN_HOME` | `$HOME/.akern` (`./.akern` without `HOME`) | user layer: `providers/<name>` and `system.md`, preferred over the same names in `$AKERN_HOME/system/` (the layer `make install` writes) |
+| `AKERN_MODEL` | none | `provider/model` when `-m` is absent. Neither given: exit 2. The kernel never reads `$AKERN_HOME/model`; the `akern-cli` front end turns it into this variable ([tools.md §4](tools.md#4-the-akern-cli-front-end)) |
 | `AKERN_RECURSION_LIMIT` | `4` | kernels that may still nest, this one included. `0`, negative or non-numeric: exit 2 |
 | `TMPDIR` | `/tmp` | directory of the anonymous session |
 
@@ -44,8 +44,8 @@ through unchanged.
 ## 2. Arguments
 
 ```
-akern-loop [-p] [-s session.jsonl] [-m provider/model] [-S system.md] [-P key=value]...
-           [--max-processes N] [--kill-grace SECONDS] [--max-line-bytes N] [prompt...]
+akern [-p] [-s session.jsonl] [-m provider/model] [-S system.md] [-P key=value]...
+      [--max-processes N] [--kill-grace SECONDS] [--max-line-bytes N] [prompt...]
 ```
 
 Flags are parsed with `getopt_long`: `--flag value` or `--flag=value`, and
@@ -56,8 +56,8 @@ or bad value, or a `-P` without `key=`: usage on stderr, exit 2.
 |---|---|---|
 | `-p`, `--print` | off | print mode: stdout per [§4](#print-mode); exits after it has run once and is quiescent, without waiting for EOF |
 | `-s`, `--session path` | `$TMPDIR/akern-session-XXXXXX` | session file. Created if missing; locked through `path.owner`. Owned by another kernel: exit 2 |
-| `-m`, `--model provider/model` | `$AKERN_MODEL` | runs `$AKERN_HOME/providers/<provider>`; the request's `model` is the part after `/` |
-| `-S`, `--system path` | `$AKERN_HOME/system.md` | system prompt file, read again for every request. Unreadable or missing: `system` is `null` |
+| `-m`, `--model provider/model` | `$AKERN_MODEL` | runs `$AKERN_HOME/providers/<provider>`, else `$AKERN_HOME/system/providers/<provider>`; the request's `model` is the part after `/` |
+| `-S`, `--system path` | `$AKERN_HOME/system.md`, else `$AKERN_HOME/system/system.md` | system prompt file, read again for every request. Unreadable or missing: `system` is `null` |
 | `-P`, `--param key=value` | | repeatable. A provider param in the request's `params`. `value` is sent as JSON when it is a JSON value (`max_tokens=64` is the number 64, `thinking={"type":"adaptive"}` an object), else as a string (`effort=high`) |
 | `prompt...` | | words joined by spaces, queued as `source: prompt`, `when: idle`, before stdin is read |
 
@@ -80,7 +80,7 @@ set and a run has started. Quiescent means: no run, no pending abort, no
 `now`, `turn` or `idle` item queued, and no running job. A finished job's
 result is a `turn` item, so it keeps the kernel alive until it is delivered;
 only results deferred by `abort` wait for the next delivery or exit. So
-`echo "start the server and run the e2e tests" | akern-loop` waits for the
+`echo "start the server and run the e2e tests" | akern` waits for the
 tests, and a running job (a dev server included) keeps it alive: a front end
 that wants jobs killed at EOF sends `{"type":"abort","jobs":true}` first. `-p`
 does not wait for EOF, which lets a sub-agent keep an open stdin pipe and still
@@ -105,7 +105,7 @@ sub-agents are in use to give it time.
 |---|---|
 | `0` | the last run did not end in `error`, or there was no run |
 | `1` | the last run ended in `error`; or a session append failed |
-| `2` | bad usage, no model, recursion limit, session cannot be opened or is owned, fatal system error. `akern-loop: <reason>` on stderr |
+| `2` | bad usage, no model, recursion limit, session cannot be opened or is owned, fatal system error. `akern: <reason>` on stderr |
 | `130` | shutdown by signal |
 
 ## 3. Stdin
@@ -491,18 +491,22 @@ With `-p` nothing above is written. Instead:
 | Stream | Content |
 |---|---|
 | stdout | at each run end, the text of the run's last assistant message (text blocks joined) and `\n`; nothing when empty |
-| stderr | at a run end with `reason: error`: `akern-loop: <error.message>`; startup failures as in [§2](#exit) |
+| stderr | at a run end with `reason: error`: `akern: <error.message>`; startup failures as in [§2](#exit) |
 
 ## 5. Files
 
 ### Home
 
-`$AKERN_HOME` is read, never written:
+`$AKERN_HOME` is read, never written. `build/` has the same layout
+(tools.md §3):
 
 ```
-providers/<name>                   the program -m <name>/… starts (providers.md)
-system.md                          the system prompt without -S; `make` and `make install`
-                                   write it, listing each skills/<name>/SKILL.md (tools.md §3)
+providers/<name>                   yours: the program -m <name>/… starts (providers.md)
+system.md                          yours: the system prompt without -S
+system/                            what `make` builds and `make install` copies:
+  providers/<name>                 used where providers/<name> above is missing
+  system.md                        used where system.md above is missing; lists
+                                   each system/skills/<name>/SKILL.md (tools.md §3)
 ```
 
 ### Layout
@@ -614,7 +618,7 @@ and prompt caches stable.
 | run | every message and `append` is one line appended to `S`; the head moves to it |
 | exit | `S.owner` is emptied; the lock goes with the process |
 | crash | the lock goes with the process; `S.owner` keeps a dead pid, which the next open overwrites |
-| resume | `akern-loop -s S`: the context is rebuilt from the head |
+| resume | `akern -s S`: the context is rebuilt from the head |
 
 A `tool_pending` with no later `job_result` was running when its kernel was
 killed with `SIGKILL`; any other exit closes it. Its files keep whatever it
@@ -626,13 +630,13 @@ wrote.
 |---|---|
 | branch in place | `{"type":"append","entry":{"type":"branch","parent":"<id>"}}`: the new entry is the head, so the next request continues from `<id>` |
 | new root | `"parent": null`: a context with no history (compaction re-appends a summary under it) |
-| fork | copy the file: `cp S F && akern-loop -s F`. The copy shares history and then diverges. Paths in its messages (output files) still point at `S.d/` |
+| fork | copy the file: `cp S F && akern -s F`. The copy shares history and then diverges. Paths in its messages (output files) still point at `S.d/` |
 
 An `append` with `parent` is held while a run is busy ([§3](#append)).
 
 ### Sub-agents
 
-A sub-agent is `akern-loop -p` on a child session, run by an `exec` call
+A sub-agent is `akern -p` on a child session, run by an `exec` call
 exactly as a person would run it; there is no wrapper command. The parent
 names its session with `-s`; without one, it is anonymous. Its files follow the
 same layout, next to that path:
@@ -646,7 +650,7 @@ agents/rename.jsonl.d/…          its own spills and jobs
 
 | Step | What happens |
 |---|---|
-| start | `exec {"argv":["akern-loop","-p","-s","agents/rename.jsonl","…"],"wait":false,"stdin_open":true}`; the directory must exist. `wait: false` lets the parent keep working; without it, the parent waits for the answer until a message arrives |
+| start | `exec {"argv":["akern","-p","-s","agents/rename.jsonl","…"],"wait":false,"stdin_open":true}`; the directory must exist. `wait: false` lets the parent keep working; without it, the parent waits for the answer until a message arrives |
 | model | the parent's: `AKERN_MODEL` is inherited, unless the argv passes `-m` |
 | run | the child appends to its own file only; the parent sees it as a job (`tail` the child's file to watch) |
 | steer | `write {"job":"<call id>","content":"…\n"}` to the child's stdin: a plain line is a `turn` item for it ([delivery modes](kernel.md#delivery-modes)), `{"type":"send","when":"now","content":"…"}` interrupts it. Each level steers the one below the same way |

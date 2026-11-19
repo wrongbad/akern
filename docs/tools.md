@@ -52,7 +52,7 @@ parallel, wake the turn and become jobs: [kernel.md: calls](kernel.md#calls).
 | `stdin` | text written to the program's stdin, which is then closed (unless `stdin_open`). No escaping, no argv size limit |
 | `stdin_open` | `true`: stdin stays open after the `stdin` text; the model sends more with `write {job}` and ends it with `close` |
 | `wait` | `false`: the model does not wait for the program (a server, a watcher, a sub-agent it steers); the call is a job from the start. Absent or `true`: the turn waits, until a message arrives |
-| `stdout_type` | a MIME type: a successful run's stdout comes back as an image block (`image/*`) or a document block (anything else). The kernel checks no list; a block the API rejects is replaced with a note in the session ([akern-loop.md](akern-loop.md#session-file)) |
+| `stdout_type` | a MIME type: a successful run's stdout comes back as an image block (`image/*`) or a document block (anything else). The kernel checks no list; a block the API rejects is replaced with a note in the session ([akern.md](akern.md#session-file)) |
 | `stdout_limit` | bytes of stdout kept in the result; default 100000; ignored with `stdout_type` |
 | `stderr_limit` | the same for stderr; default 100000 |
 
@@ -62,7 +62,7 @@ parallel, wake the turn and become jobs: [kernel.md: calls](kernel.md#calls).
 | stdout, stderr | two pipes, collected separately and in full |
 | exit status | reported as is; anything but `0` sets `is_error` |
 | process group | its own, so a signal to the group reaches everything it started |
-| environment, cwd | the kernel's, plus [akern-loop.md §1](akern-loop.md#set-for-children) |
+| environment, cwd | the kernel's, plus [akern.md §1](akern.md#set-for-children) |
 | not found | `execvp`'s error on stderr, exit 127 |
 
 Nothing else passes between the program and the kernel; a program cannot
@@ -153,7 +153,7 @@ programs, the model through `exec`.
 | `akern-<cmd> --help` | one line: usage, then what it does. No listing command: skills are the model's index, people tab-complete `akern-` |
 | no wrappers | when a wrapper seems needed, the API it would wrap is missing something, and that is fixed instead. Listing, stopping and waiting for jobs need no command (§1, Jobs) |
 | no write command | files are written with `write`, so their contents never pass through a shell script and its escape traps (heredocs expanding `$` and backticks, `echo` reading backslashes, `printf` reading `%`). The model runs `mkdir -p` first for a new directory |
-| session commands | take the session path as the first argument; write to the file only when it is not owned ([akern-loop.md](akern-loop.md#writing)); an owned session is changed through its kernel's stdin |
+| session commands | take the session path as the first argument; write to the file only when it is not owned ([akern.md](akern.md#writing)); an owned session is changed through its kernel's stdin |
 | slash commands | an interactive front end maps `/cmd args` to `akern-cmd SESSION args` and shows its stdout |
 | shims | a program earlier on `PATH` wraps another: check, rewrite, log, redact. Shims must be reentrant, since parallel calls run them at once |
 
@@ -209,50 +209,58 @@ description: Background jobs, interactive programs and sub-agents — …
 
 | Item | Rule |
 |---|---|
-| location | `$AKERN_HOME/skills/<name>/SKILL.md` |
+| location | `$AKERN_HOME/system/skills/<name>/SKILL.md` (`skills/<name>/SKILL.md` in the repository) |
 | header | `name:` (default: the directory name) and `description:`, one line each |
 | `system.md` | `Skills: read a skill's file before relying on it.`, then one line per skill: `- NAME: DESCRIPTION (absolute path of SKILL.md)`. No skills: no file |
 | use | `system.md` is the system prompt without `-S`; the model reads a skill's file with `read` before relying on it, so only the list costs context on every request |
 
 | Shipped | Covers |
 |---|---|
-| `skills/akern` | jobs (`wait: false`, `tail`, `kill`), talking to a running program (`stdin_open`, `write {job}`), sub-agents as `akern-loop -p` ([akern-loop.md](akern-loop.md#sub-agents)) |
+| `skills/akern` | jobs (`wait: false`, `tail`, `kill`), talking to a running program (`stdin_open`, `write {job}`), sub-agents as `akern -p` ([akern.md](akern.md#sub-agents)) |
 | `skills/files` | `akern-edit`, editing tips, images and PDFs through `read`'s `type` and `exec`'s `stdout_type`, searching with ordinary programs |
 
 ### Install
 
 | `make` | `make install` (`PREFIX=/usr/local`, `HOME_DIR=~/.akern`) |
 |---|---|
-| `build/bin/`: `akern-loop`, `akern-edit`, `akern`, `akern-model` | the same programs into `$PREFIX/bin` |
-| `build/providers/` | into `$HOME_DIR/providers`, replacing older copies |
-| `build/skills/`, `build/render.jq` | into `$HOME_DIR`, each only if missing |
-| `build/system.md`, listing `build/skills` | `$HOME_DIR/system.md`, only if missing, listing every skill in `$HOME_DIR/skills` |
+| `build/bin/`: `akern`, `akern-edit`, `akern-cli`, `akern-model` | the same programs into `$PREFIX/bin` |
+| `build/system/`: `providers/`, `skills/`, `render.jq`, `README.md` (from `home/README.md`: the layout and how to override) | copied to `$HOME_DIR/system/`, which is removed first |
+| `build/system/system.md`, listing `build/system/skills` | written again at install, listing `$HOME_DIR/system/skills` |
 
-An edited `render.jq` or `system.md` survives `make install`; a skill of your
-own needs its line added to `system.md` by hand. Neither `make` nor
-`make install` writes `model` ([§4](#4-the-akern-front-end)); `make clean`
-removes `build/`, and with it `build/model`.
+`build/` has the layout of an installed `$HOME_DIR`, so `AKERN_HOME=build`
+(what `./akern-dev.sh` sets) runs the build as if installed.
+`$HOME_DIR/system` is the base layer and belongs to `make install`, which
+replaces it whole: a file dropped from a release does not linger. The user
+layer is `$HOME_DIR` itself, looked up first: `providers/<name>`, `render.jq`,
+`system.md`. A shadowing file is reported by the install. Install writes
+nothing there, and removes only what an install from before `system/` left:
+a provider, `render.jq` or `system.md` byte-identical to the new one in
+`system/` is deleted and reported; one that differs at all is kept and
+reported as shadowing. Skills stay in `system/skills`; a `system.md` of your
+own must list its own skills. Neither `make` nor `make install` writes `model`
+([§4](#4-the-akern-cli-front-end)); `make clean` removes `build/`, and with it
+`build/model`.
 
-## 4. The akern front end
+## 4. The akern-cli front end
 
-`tools/akern`, a shell script for people:
+`tools/akern-cli`, a shell script for people:
 
 ```
-akern ["prompt text"]
+akern-cli ["prompt text"]
 ```
 
-It runs `akern-loop [-- "$*"] | "$AKERN_HOME/render.jq" --arg prompted BOOL`
-with stdin still the terminal: every line typed is sent, steering the agent
+It runs `akern [-- "$*"] | RENDER --arg prompted BOOL`, where `RENDER` is
+`$AKERN_HOME/render.jq`, else `$AKERN_HOME/system/render.jq`, with stdin still the terminal: every line typed is sent, steering the agent
 when it is working, and Ctrl-D ends. The shell and `jq` ignore `SIGINT`, so
-Ctrl-C reaches only `akern-loop` ([akern-loop.md §2](akern-loop.md#exit)).
-Scripts that want one answer use `akern-loop -p "…"`.
+Ctrl-C reaches only `akern` ([akern.md §2](akern.md#exit)).
+Scripts that want one answer use `akern -p "…"`.
 
 The model, exported as `AKERN_MODEL`, is the first that is set:
 
 1. `AKERN_MODEL`;
 2. the first line of `$AKERN_HOME/model`;
 3. what `akern-model` prints, after asking on the terminal. Its failure ends
-   `akern`.
+   `akern-cli`.
 
 `tools/render.jq` is the display, as data: edit it to change what is shown.
 
@@ -279,7 +287,7 @@ Whenever it changes, a dim status line follows, on a line of its own:
 
 ### akern-model
 
-`tools/akern-model`, `sh` and `jq`. Sets the default model, the file `akern`
+`tools/akern-model`, `sh` and `jq`. Sets the default model, the file `akern-cli`
 reads.
 
 ```
@@ -292,9 +300,10 @@ akern-model [provider/model]
 | `akern-model` | asks on `/dev/tty`, even when a default exists; saves and prints the choice as above |
 | `akern-model --help` | the usage line |
 
-Asking runs every executable in `$AKERN_HOME/providers` with `--models`
+Asking runs every executable in `$AKERN_HOME/providers`, then in
+`$AKERN_HOME/system/providers` those whose name is not taken, with `--models`
 ([providers.md §1](providers.md#1-finding-and-running-a-provider)), one at a time, each killed after
-10 s, and lists them all alphabetically, numbered. One that exits 0 is ready;
+10 s, and lists them in that order, each layer alphabetically, numbered. One that exits 0 is ready;
 one that fails is marked, dim, `(unavailable: MESSAGE)`, the `message` of its
 `error` line (`(unavailable)` without one). There is no table of which
 variable or binary a provider needs: its error says. Choosing an unavailable
@@ -321,5 +330,5 @@ claude-code/opus
 | Exit | Output |
 |---|---|
 | 0 | the saved `provider/model` on stdout |
-| 1 | no terminal: on stderr, `akern-model: no model set`, or `akern-model: no terminal` when `$AKERN_HOME/model` exists. No provider: `akern-model: no provider in DIR`. None ready: the list, then `akern-model: no provider is ready`. Ctrl-D at a prompt: nothing saved |
+| 1 | no terminal: on stderr, `akern-model: no model set`, or `akern-model: no terminal` when `$AKERN_HOME/model` exists. No provider: `akern-model: no provider in HOME/providers or HOME/system/providers`. None ready: the list, then `akern-model: no provider is ready`. Ctrl-D at a prompt: nothing saved |
 | 2 | other arguments: the usage line on stderr |

@@ -45,13 +45,15 @@ choose() {
     return 1
 }
 
-records=$(for p in "$home"/providers/*; do
+records=$(seen=" "; for p in "$home"/providers/* "$home"/system/providers/*; do
     [ -f "$p" ] && [ -x "$p" ] || continue
+    case $seen in (*" ${p##*/} "*) continue ;; esac
+    seen="$seen${p##*/} "
     out=$(listing "$p") && ready=true || ready=false
     printf '%s\n' "$out" | jq -cnR --arg name "${p##*/}" --argjson ready $ready '[inputs | fromjson? | objects]
         | {$name, $ready, ids: map(.id // empty), reason: (map(select(.type == "error") | .message) | first)}'
 done)
-[ -n "$records" ] || { echo "akern-model: no provider in $home/providers" >&2; exit 1; }
+[ -n "$records" ] || { echo "akern-model: no provider in $home/providers or $home/system/providers" >&2; exit 1; }
 labels=$(printf '%s\n' "$records" | jq -r '.name + if .ready then ""
     else "  \u001b[2m(" + (["unavailable", .reason // empty] | join(": ")) + ")\u001b[0m" end')
 if ! printf '%s\n' "$records" | grep -q '"ready":true'; then

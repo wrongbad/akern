@@ -3,12 +3,12 @@
 import json
 import os
 import subprocess
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent
-PROVIDER = Path(os.environ.get("AKERN_BUILD", REPO / "build")) / "providers" / "claude-code"
+from conftest import BUILD, REPO
+
+PROVIDER = BUILD / "system" / "providers" / "claude-code"
 
 EXEC = {"name": "exec", "description": "Run a program.", "input_schema": {"type": "object", "properties": {"argv": {"type": "array"}}}}
 

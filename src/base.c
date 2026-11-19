@@ -37,7 +37,7 @@ void die(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    fputs("akern-loop: ", stderr);
+    fputs("akern: ", stderr);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     va_end(ap);

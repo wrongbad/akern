@@ -1,0 +1,11 @@
+#!/bin/sh
+case "$1" in --help) echo 'usage: akern-cli ["prompt text"] — start with the prompt, then send each line typed; Ctrl-D ends'; exit 0 ;; esac
+home="${AKERN_HOME:-$HOME/.akern}"
+: "${AKERN_MODEL:=$(sed -n 1p "$home/model" 2>/dev/null)}"
+[ -n "$AKERN_MODEL" ] || AKERN_MODEL=$(akern-model) || exit
+export AKERN_MODEL
+prompted=false
+[ $# -gt 0 ] && set -- -- "$*" && prompted=true
+trap '' INT
+render="$home/render.jq"; [ -x "$render" ] || render="$home/system/render.jq"
+akern "$@" | "$render" --arg prompted $prompted

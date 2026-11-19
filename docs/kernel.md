@@ -1,7 +1,7 @@
 # Kernel
 
-The modules of `akern-loop` in `src/`, and the API each offers the others.
-What the process reads and writes is [akern-loop.md](akern-loop.md); the
+The modules of `akern` in `src/`, and the API each offers the others.
+What the process reads and writes is [akern.md](akern.md); the
 provider API is [providers.md](providers.md); the tools are
 [tools.md](tools.md).
 
@@ -42,7 +42,7 @@ What `set` changes lives in the driver.
 
 | Step | |
 |---|---|
-| options | flags and environment per [akern-loop.md §1–2](akern-loop.md#1-environment-variables); a bad flag, no model or a spent recursion limit exits 2. Without `-s`, `mkstemp` creates `$TMPDIR/akern-session-XXXXXX` |
+| options | flags and environment per [akern.md §1–2](akern.md#1-environment-variables); a bad flag, no model or a spent recursion limit exits 2. Without `-s`, `mkstemp` creates `$TMPDIR/akern-session-XXXXXX` |
 | wire | every module's sibling pointers and `config` |
 | open | `loop_open`, `sink_open`, `session_open`, `driver_open` (exports `AKERN_MODEL`), then exports `AKERN_RECURSION_LIMIT` minus 1 |
 | start | `hello` event; the positional prompt as `inbox_add(FROM_PROMPT, WHEN_IDLE)` |
@@ -110,7 +110,7 @@ Replies go out through the sink; what a command does belongs to other modules.
 | `append` | `driver_append` | ok: driver, when appended; error: ctl |
 | `status` | `driver_status` | ctl |
 
-Line syntax, fields and reply texts: [akern-loop.md §3](akern-loop.md#3-stdin).
+Line syntax, fields and reply texts: [akern.md §3](akern.md#3-stdin).
 
 ## driver
 
@@ -388,7 +388,7 @@ arrival order, so ten jobs finishing together wake the model once.
 
 `src/session.c`. The session log, which this kernel alone appends to while it
 runs: the ownership lease, appends, the head, the context, and whether an
-append has failed. File format: [akern-loop.md §5](akern-loop.md#session-file).
+append has failed. File format: [akern.md §5](akern.md#session-file).
 
 **State:** the file and its size; the `.owner` lock; an index of every entry
 (`id`, `parent`, offset, length, whether it is a `message`, and the last
@@ -413,7 +413,7 @@ append has failed. File format: [akern-loop.md §5](akern-loop.md#session-file).
 | one writer | while it runs, only this kernel appends; others go through `append` on its stdin |
 | append-only | never rewritten or truncated; as sole writer it never re-reads, only updates the index |
 | reading | the first line (the header), lines that are not valid JSON and lines without a string `id` are not entries; ids up to 32 characters |
-| current message | a `message` entry's own, or that of the last `replace` entry in the file whose `target` is it and whose `message` is an object, whatever its chain ([akern-loop.md §5](akern-loop.md#session-file)) |
+| current message | a `message` entry's own, or that of the last `replace` entry in the file whose `target` is it and whose `message` is an object, whatever its chain ([akern.md §5](akern.md#session-file)) |
 | chain | stops at a `parent` that is `null` or unknown, or after as many steps as there are entries |
 | failure | after a failed append the loop shuts down with exit 1: the log is the state, and running on without it would make it disagree with what happened |
 
@@ -434,7 +434,7 @@ nothing of the modules that write to it.
 | `sink_watch(out, set)` | polls stdout while bytes are pending | loop |
 | `sink_backlogged(out)` | more than 8 MiB pending; the loop then stops reading workers' stdout | loop |
 | `sink_flush(out)` | blocking write of everything pending | main |
-| `sink_answer(out, answer, error)` | with `-p`: the answer and `\n` on stdout (nothing when empty); `akern-loop: MESSAGE` on stderr when `error` is given | driver |
+| `sink_answer(out, answer, error)` | with `-p`: the answer and `\n` on stdout (nothing when empty); `akern: MESSAGE` on stderr when `error` is given | driver |
 | `event(out, fmt, …)` | one event line, `json_printf` format | every module |
 | `event_raw(out, line)` | one JSON line as given | driver, ctl |
 | `event_notice(out, source, message)` | a `notice` event | driver |
@@ -505,7 +505,7 @@ vectors, complete writes and clocks. A `char *` returned (except by
 | Function | Contract |
 |---|---|
 | `xmalloc`, `xcalloc`, `xrealloc`, `xstrdup` | allocate; out of memory is fatal |
-| `die(fmt, …)` | `akern-loop: MESSAGE` on stderr, exit 2 |
+| `die(fmt, …)` | `akern: MESSAGE` on stderr, exit 2 |
 | `write_all(fd, bytes)` | writes everything, retrying on `EINTR`; `false` on error |
 | `S`, `span_eq`, `span_dup` | spans |
 | `buf_put`, `buf_puts`, `buf_putc`, `buf_putspan`, `buf_printf`, `buf_set`, `buf_drop_front`, `buf_span`, `buf_cstr`, `buf_free` | growable byte buffers |

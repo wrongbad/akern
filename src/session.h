@@ -1,4 +1,4 @@
-/* session: the session log (akern-loop.md §5), which this kernel alone appends to while it
+/* session: the session log (akern.md §5), which this kernel alone appends to while it
    runs. Owns the ownership lease, appending entries of any type, the head, building the
    context, and whether an append has failed: from then on it appends nothing and an append
    returns NULL. What to append, and when, is decided by the driver; stopping when the log

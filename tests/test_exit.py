@@ -46,7 +46,7 @@ def test_sigint_aborts_keeping_jobs_and_a_second_within_3s_shuts_down(kernel):
 def test_ctrl_c_in_the_front_end_aborts_and_hints_and_a_second_quits(tmp_path, akern_env):
     pid, fd = pty.fork()
     if pid == 0:
-        os.execvpe("akern", ["akern"], {**akern_env, "AKERN_MODEL": "mock/echo", "TMPDIR": str(tmp_path)})
+        os.execvpe("akern-cli", ["akern-cli"], {**akern_env, "AKERN_MODEL": "mock/echo", "TMPDIR": str(tmp_path)})
     screen = bytearray()
 
     def read():
@@ -91,7 +91,7 @@ def test_print_mode_writes_only_the_final_answer(kernel):
 def test_a_run_ending_in_error_exits_1_and_print_mode_says_why_on_stderr(kernel):
     run = kernel("hello", "-p", "-m", "nope/x", code=1)
     assert run.output == ""
-    assert run.stderr == f"akern-loop: no provider for nope/x in {BUILD}/providers\n"
+    assert run.stderr == f"akern: no provider for nope/x in {BUILD}/providers or {BUILD}/system/providers\n"
 
 
 @pytest.mark.parametrize("args", [["-o", "max_procs=4"], ["--max-procs", "4"], ["--kill-grace", "soon"], ["-P", "effort"]],
@@ -99,14 +99,14 @@ def test_a_run_ending_in_error_exits_1_and_print_mode_says_why_on_stderr(kernel)
 def test_an_unknown_flag_or_a_bad_value_prints_usage_and_exits_2(kernel, args):
     run = kernel("hello", *args, code=2)
     assert run.output == ""
-    assert "usage: akern-loop" in run.stderr
+    assert "usage: akern" in run.stderr
 
 
 @pytest.mark.parametrize("limit", ["0", "-1", "deep"])
 def test_a_recursion_limit_below_1_refuses_to_start(kernel, limit):
     run = kernel("hello", env={"AKERN_RECURSION_LIMIT": limit}, code=2)
     assert run.output == ""
-    assert run.stderr.startswith("akern-loop: recursion limit reached")
+    assert run.stderr.startswith("akern: recursion limit reached")
 
 
 def test_a_session_owned_by_a_running_kernel_cannot_be_opened(kernel, akern_env):
@@ -114,10 +114,10 @@ def test_a_session_owned_by_a_running_kernel_cannot_be_opened(kernel, akern_env)
 
     def open_it_again(run):
         wait_for(lambda: run.events_of("tool_start"))
-        second["run"] = subprocess.run(["akern-loop", "-m", "mock/echo", "-s", str(run.session)], env=akern_env,
+        second["run"] = subprocess.run(["akern", "-m", "mock/echo", "-s", str(run.session)], env=akern_env,
                                        stdin=subprocess.DEVNULL, capture_output=True, text=True)
         os.kill(run.pid, signal.SIGINT)
 
     run = kernel(shell("sleep 30"), during=open_it_again)
     assert second["run"].returncode == 2
-    assert second["run"].stderr == f"akern-loop: session {run.session} is owned by another kernel (pid {run.pid})\n"
+    assert second["run"].stderr == f"akern: session {run.session} is owned by another kernel (pid {run.pid})\n"

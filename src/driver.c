@@ -110,10 +110,14 @@ static const char *model_id(const driver *d)
 static char *provider_path(const driver *d)
 {
     span provider = { d->provider_model, strcspn(d->provider_model, "/") };
-    buf path = { 0 };
-    buf_printf(&path, "%s/providers/%.*s", d->config->home_dir, (int)provider.n, provider.p);
-    if (provider.n && provider.p[0] != '.' && access(path.p, X_OK) == 0) return path.p;
-    buf_free(&path);
+    if (!provider.n || provider.p[0] == '.') return NULL;
+    static const char *const layers[] = { "", "/system" };    /* the user's overlay, then what make install owns */
+    for (size_t i = 0; i < sizeof layers / sizeof *layers; i++) {
+        buf path = { 0 };
+        buf_printf(&path, "%s%s/providers/%.*s", d->config->home_dir, layers[i], (int)provider.n, provider.p);
+        if (access(path.p, X_OK) == 0) return path.p;
+        buf_free(&path);
+    }
     return NULL;
 }
 
@@ -161,7 +165,7 @@ static void spawn_provider(driver *d, json request)
     char *path = provider_path(d);
     if (!path) {
         buf why = { 0 };
-        buf_printf(&why, "no provider for %s in %s/providers", d->provider_model, d->config->home_dir);
+        buf_printf(&why, "no provider for %s in %s/providers or %s/system/providers", d->provider_model, d->config->home_dir, d->config->home_dir);
         report_error(d, "provider", buf_span(&why));
         buf_free(&why);
         end_run(d, "error");

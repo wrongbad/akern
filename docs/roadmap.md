@@ -1,7 +1,7 @@
 # Roadmap
 
 Work not yet done, and decisions still open. What exists is specified in
-[akern-loop.md](akern-loop.md), [kernel.md](kernel.md),
+[akern.md](akern.md), [kernel.md](kernel.md),
 [providers.md](providers.md) and [tools.md](tools.md); why, in
 [design.md](design.md). Everything below is userland unless it says otherwise.
 
@@ -9,7 +9,7 @@ Work not yet done, and decisions still open. What exists is specified in
 
 ### Front end
 
-`akern` ([tools.md §4](tools.md#4-the-akern-front-end)) sends one prompt per
+`akern-cli` ([tools.md §4](tools.md#4-the-akern-cli-front-end)) sends one prompt per
 line and renders events through `render.jq`.
 
 | Item | Scope |
@@ -33,7 +33,7 @@ session path first, direct appends only to an unowned session.
 | `akern-sessions` | lists sessions: path, name, head, last activity |
 | `akern-fork` | copies a chain to a new file |
 | `akern-tree` | shows the entry tree; appends a `branch` |
-| `akern-compact` | runs the provider for a summary, then appends a new root and the kept copies ([akern-loop.md](akern-loop.md#session-file)) |
+| `akern-compact` | runs the provider for a summary, then appends a new root and the kept copies ([akern.md](akern.md#session-file)) |
 | `akern-models` | runs each provider in `$AKERN_HOME/providers` with `--models` |
 | `akern-pkg` | `install`, `remove`, `update`, `list`: programs onto `PATH`, providers and skills into `$AKERN_HOME` |
 
@@ -109,10 +109,10 @@ a second UI) get a way in.
 
 The kernel reads flags and environment only. The default model already has a
 home: `$AKERN_HOME/model`, one line, written by `akern-model` and turned into
-`AKERN_MODEL` by the `akern` front end ([tools.md §4](tools.md#4-the-akern-front-end)).
+`AKERN_MODEL` by the `akern-cli` front end ([tools.md §4](tools.md#4-the-akern-cli-front-end)).
 Still open: the other settings (`-P` params such as effort, the system prompt,
 limits), and whether each gets a one-value file like `model` or they share a
-`~/.akern/config`. *Leaning:* the `akern` front end, with `key=value` lines that
+`~/.akern/config`. *Leaning:* the `akern-cli` front end, with `key=value` lines that
 a shell reads without a parser, so front ends in any language share it.
 
 Project-local skills and system prompts (`./.akern/`, honored only in trusted

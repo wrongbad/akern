@@ -59,7 +59,7 @@ void sink_answer(sink *out, span answer, json error)
     if (!error.p) return;
     buf message_text = { 0 };
     json_text(json_get(error, "message"), &message_text);
-    fprintf(stderr, "akern-loop: %s\n", buf_cstr(&message_text));
+    fprintf(stderr, "akern: %s\n", buf_cstr(&message_text));
     buf_free(&message_text);
 }
 

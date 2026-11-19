@@ -51,12 +51,12 @@ struct kernel {
 
 static void usage(void)
 {
-    fputs("usage: akern-loop [-p] [-s session.jsonl] [-m provider/model] [-S system.md] [-P key=value]...\n"
-          "                  [--max-processes N] [--kill-grace SECONDS] [--max-line-bytes N] [prompt...]\n"
+    fputs("usage: akern [-p] [-s session.jsonl] [-m provider/model] [-S system.md] [-P key=value]...\n"
+          "             [--max-processes N] [--kill-grace SECONDS] [--max-line-bytes N] [prompt...]\n"
           "  -p, --print              print each run's final answer instead of the event stream\n"
           "  -s, --session PATH       session file (default: a new one in $TMPDIR)\n"
           "  -m, --model P/M          provider/model (default: $AKERN_MODEL)\n"
-          "  -S, --system PATH        system prompt file (default: $AKERN_HOME/system.md)\n"
+          "  -S, --system PATH        system prompt file (default: $AKERN_HOME/system.md, else $AKERN_HOME/system/system.md)\n"
           "  -P, --param KEY=VALUE    provider parameter; VALUE is sent as JSON if it is JSON, else as a string\n"
           "      --max-processes N    exec programs running at once (default 32)\n"
           "      --kill-grace SECONDS from SIGTERM to SIGKILL (default 2)\n"
@@ -67,7 +67,7 @@ static void usage(void)
 
 static void bad_value(const char *flag)
 {
-    fprintf(stderr, "akern-loop: invalid --%s: %s\n", flag, optarg);
+    fprintf(stderr, "akern: invalid --%s: %s\n", flag, optarg);
     usage();
 }
 
@@ -151,7 +151,11 @@ static int parse_args(config *cfg, int argc, char **argv)
     if (cfg->recursion_limit <= 0)
         die("recursion limit reached: this kernel would be nested too deep (AKERN_RECURSION_LIMIT)");
     cfg->home_dir = home_dir();
-    if (!cfg->system_path) cfg->system_path = home_file(cfg, "system.md");
+    if (!cfg->system_path) {
+        char *own = home_file(cfg, "system.md");
+        if (access(own, R_OK) == 0) cfg->system_path = own;
+        else free(own), cfg->system_path = home_file(cfg, "system/system.md");
+    }
     if (!cfg->session_path) cfg->session_path = new_session_path();
     buf_cstr(&cfg->param_members);
     return optind;

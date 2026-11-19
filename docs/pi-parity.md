@@ -6,13 +6,13 @@ seam that provides it, and roughly how.
 
 Feature list taken from pi's documentation as of November 2026.
 
-**Where** column: **Kernel** is `akern-loop` itself; **User (bundled)** is a program or skill shipped in this repo; **User** is anything else, built on the documented contracts, including what [roadmap.md](roadmap.md) plans.
+**Where** column: **Kernel** is `akern` itself; **User (bundled)** is a program or skill shipped in this repo; **User** is anything else, built on the documented contracts, including what [roadmap.md](roadmap.md) plans.
 
 ## Core loop and tools
 
 | Pi feature | Where | Mechanism |
 |---|---|---|
-| Agent loop with streaming | Kernel | `akern-loop` |
+| Agent loop with streaming | Kernel | `akern` |
 | `bash` | Kernel | the built-in `exec` tool: the model runs `["bash","-c",…]` (or any shell it finds) itself |
 | `read` | Kernel | the built-in [`read`](tools.md#read) tool: a range of lines, or a file as an image or document block by its MIME type |
 | `write` | Kernel | the built-in [`write`](tools.md#write) tool: atomic replace, or append; nothing passes through a shell |
@@ -46,9 +46,9 @@ mechanisms, because they are what tests whether the architecture holds.
 | Pi feature | Where | Mechanism |
 |---|---|---|
 | RPC mode | Kernel | the control stream *is* the kernel's only mode: commands on stdin, events on stdout |
-| JSON mode | Kernel | `akern-loop` with prompts on stdin |
-| Print mode (`-p`) | Kernel | `akern-loop -p "text"`: only each run's final answer on stdout. `akern "text"` instead renders the event stream through `render.jq` |
-| Interactive mode | User (bundled) | `akern`, with or without a first prompt: each line typed is sent (steering while the agent works), results rendered as they arrive. A full-screen TUI would be a separate, larger program against the same stream |
+| JSON mode | Kernel | `akern` with prompts on stdin |
+| Print mode (`-p`) | Kernel | `akern -p "text"`: only each run's final answer on stdout. `akern-cli "text"` instead renders the event stream through `render.jq` |
+| Interactive mode | User (bundled) | `akern-cli`, with or without a first prompt: each line typed is sent (steering while the agent works), results rendered as they arrive. A full-screen TUI would be a separate, larger program against the same stream |
 | SDK | — | the protocols are the SDK; any language with pipes and JSON has one |
 
 ## Sessions
@@ -56,8 +56,8 @@ mechanisms, because they are what tests whether the architecture holds.
 | Pi feature | Where | Mechanism |
 |---|---|---|
 | JSONL session files, tree-structured | Kernel | the session log |
-| Per-directory storage, auto-save | User | the `akern` front end picks `~/.akern/sessions/<cwd>/<time>-<id>.jsonl` |
-| `--continue`, `--resume`, `--session` | User | `akern-sessions` lists; the `akern` front end passes `-s` |
+| Per-directory storage, auto-save | User | the `akern-cli` front end picks `~/.akern/sessions/<cwd>/<time>-<id>.jsonl` |
+| `--continue`, `--resume`, `--session` | User | `akern-sessions` lists; the `akern-cli` front end passes `-s` |
 | `--no-session` | Kernel | omit `-s` |
 | `/tree` (branch in place) | User | `akern-tree` appends a `branch` entry (deferred to a boundary if a run is active) |
 | `/fork`, `/clone` | User | `akern-fork` copies a chain to a new file |
@@ -73,10 +73,10 @@ mechanisms, because they are what tests whether the architecture holds.
 
 | Pi feature | Where | Mechanism |
 |---|---|---|
-| `AGENTS.md` / `CLAUDE.md` discovery | User | the `akern` front end adds found files to the system prompt file it passes with `-S`, or a wrapping provider appends them to `system` |
+| `AGENTS.md` / `CLAUDE.md` discovery | User | the `akern-cli` front end adds found files to the system prompt file it passes with `-S`, or a wrapping provider appends them to `system` |
 | System prompt replace / append | Kernel | `$AKERN_HOME/system.md`, `-S file` or `set`; append by editing the file, or in a wrapping provider |
-| Prompt templates (`/name`) | User | the `akern` front end expands `prompts/<name>.md` before sending |
-| Skills (`SKILL.md`) | User (bundled) | `make install` lists skill names and descriptions in `$AKERN_HOME/system.md`; the model reads them with `read` |
+| Prompt templates (`/name`) | User | the `akern-cli` front end expands `prompts/<name>.md` before sending |
+| Skills (`SKILL.md`) | User (bundled) | `make install` lists skill names and descriptions in `$AKERN_HOME/system/system.md`; the model reads them with `read` |
 | `@file` references | User | the frontend turns them into content blocks |
 | `!cmd` and `!!cmd` | User | frontend runs the command; `!` sends the output as a prompt, `!!` does not |
 | Images | Kernel | content blocks pass through; the frontend creates them |
@@ -90,9 +90,9 @@ mechanisms, because they are what tests whether the architecture holds.
 | Other providers, custom providers | User | one executable each |
 | `--model`, `--thinking` | Kernel | `-m provider/model`, `-P effort=high` |
 | `/model` switch mid-session | Kernel | `set` command; takes effect at the next request |
-| Default model setting | User (bundled) | `$AKERN_HOME/model`, one `provider/model` line; `akern` exports it as `AKERN_MODEL` when that is unset |
-| Interactive model selector | User (bundled) | `akern-model`: every provider, numbered, with why an unavailable one cannot be used; then the ready one's `--models` ids or a typed id. `akern` runs it when no model is set |
-| Model cycling, scoped models, fuzzy match | User | `akern` or frontend feature over `<provider> --models` |
+| Default model setting | User (bundled) | `$AKERN_HOME/model`, one `provider/model` line; `akern-cli` exports it as `AKERN_MODEL` when that is unset |
+| Interactive model selector | User (bundled) | `akern-model`: every provider, numbered, with why an unavailable one cannot be used; then the ready one's `--models` ids or a typed id. `akern-cli` runs it when no model is set |
+| Model cycling, scoped models, fuzzy match | User | `akern-cli` or frontend feature over `<provider> --models` |
 | `--list-models` | User | `akern-models` runs each provider with `--models` |
 | `auth login` / `logout` / OAuth subscriptions | User | `akern-login-<provider>`, owned by the provider package |
 | Retries, backoff | User (bundled) | inside the provider |
@@ -105,20 +105,20 @@ mechanisms, because they are what tests whether the architecture holds.
 |---|---|---|
 | Extensions | Kernel | tools + providers + commands + frontends |
 | Extension-registered commands | User | `bin/akern-<name>` |
-| Extension-registered CLI flags | User | environment variables read by the extension; the `akern` front end can map flags to them |
+| Extension-registered CLI flags | User | environment variables read by the extension; the `akern-cli` front end can map flags to them |
 | Keyboard shortcuts, themes, custom rendering, widgets, status line | User | frontend features; the kernel never sees them |
 | `ctx.ui.confirm` / `select` / `input` | User | an [`AKERN_ASK`](tools.md#akern_ask) helper, serialized across parallel calls |
 | `sendMessage` / `sendUserMessage` from an extension | Kernel + User | `send` on stdin, with any `when`, from the frontend |
 | Packages (`install`, `remove`, `update`, `list`) | User | `akern-pkg`: programs onto `PATH`, providers and skills into `~/.akern` |
 | Project-local config with trust gate | — | not yet: only `~/.akern` is read ([roadmap.md](roadmap.md#where-settings-live)) |
-| Settings files (global, project) | User | read by the `akern` front end and frontends, exported as environment and flags (`-m`, `-P`) |
+| Settings files (global, project) | User | read by the `akern-cli` front end and frontends, exported as environment and flags (`-m`, `-P`) |
 | Hot reload (`/reload`) | Kernel | nothing to do: tools are found on `PATH` per call, the provider and `system.md` per request |
 
 ## Things pi leaves to extensions
 
 | Feature | Where | Sketch |
 |---|---|---|
-| Sub-agents | Kernel + User (bundled) | `akern-loop -p "task"`, run through `exec` with `wait: false` and `stdin_open: true`; the parent names the child session with `-s`, the kernel counts down the recursion limit, and the answer is the job's stdout. The parent model steers it with `write {"job":"<call id>","content":"line\n"}`; no messages up mid-run, it reports once at the end ([akern-loop.md](akern-loop.md#sub-agents)) |
+| Sub-agents | Kernel + User (bundled) | `akern -p "task"`, run through `exec` with `wait: false` and `stdin_open: true`; the parent names the child session with `-s`, the kernel counts down the recursion limit, and the answer is the job's stdout. The parent model steers it with `write {"job":"<call id>","content":"line\n"}`; no messages up mid-run, it reports once at the end ([akern.md](akern.md#sub-agents)) |
 | Permission gates | User | a shim on `PATH` in front of a program calls `$AKERN_ASK confirm`; non-zero exit denies. Only the gated call waits; the others proceed. `read` and `write` are confined by an OS sandbox instead |
 | Path protection | User | an OS sandbox around the kernel (`bwrap`, `sandbox-exec`, a container) |
 | Sandboxed / remote / SSH execution | User | the whole kernel inside `bwrap`, `sandbox-exec` or a container; a shim on `PATH` that runs its program through `ssh host …` |
@@ -144,7 +144,7 @@ mechanisms, because they are what tests whether the architecture holds.
 | `session_before_compact` / `_fork` / `_tree` / `_switch` and their after-events | those operations are commands; edit or wrap the command |
 | `model_select`, `thinking_level_select` | `set` command; frontends observe it |
 | `user_bash` | frontend |
-| `project_trust` | the `akern` front end |
+| `project_trust` | the `akern-cli` front end |
 | `resources_discover` | `PATH` for programs, `~/.akern` for providers, skills and `system.md` |
 
 ## Known gaps
@@ -152,7 +152,7 @@ mechanisms, because they are what tests whether the architecture holds.
 Honest list of where parity needs more than a script:
 
 1. **A real TUI.** Pi's interactive mode is a large part of its value. Here it
-   is a separate project against the control stream. `akern` line mode is a
+   is a separate project against the control stream. `akern-cli` line mode is a
    placeholder, not a substitute. With concurrency in the kernel, the TUI also
    has more to show: parallel calls, jobs and a tree of sub-agents.
 2. **Extension-driven UI.** Pi extensions can draw custom components inside

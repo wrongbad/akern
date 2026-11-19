@@ -5,11 +5,12 @@ import os
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
-PROVIDER = Path(__file__).resolve().parent.parent / "build" / "providers" / "openai"
+from conftest import BUILD
+
+PROVIDER = BUILD / "system" / "providers" / "openai"
 
 
 def sse(*events):

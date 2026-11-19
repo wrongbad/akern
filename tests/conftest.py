@@ -1,4 +1,4 @@
-"""Fixtures for running akern-loop against the mock provider, and helpers for reading what it did."""
+"""Fixtures for running akern against the mock provider, and helpers for reading what it did."""
 
 import json
 import os
@@ -71,7 +71,7 @@ def wait_for(condition, timeout=5.0):
 
 
 class Run:
-    """One akern-loop run: its session log, its event stream, and readings of both."""
+    """One akern run: its session log, its event stream, and readings of both."""
 
     def __init__(self, session, printing):
         self.session = session
@@ -155,7 +155,7 @@ class Run:
 
 
 class Kernel:
-    """Runs akern-loop in a test's directory, one numbered session per run; sub-agents' go in agents/."""
+    """Runs akern in a test's directory, one numbered session per run; sub-agents' go in agents/."""
 
     def __init__(self, dir, env):
         self.dir = dir
@@ -174,7 +174,7 @@ class Kernel:
         """
         self.runs += 1
         run = Run(self.dir / f"run{self.runs}.jsonl", printing="-p" in args)
-        argv = ["akern-loop", "-m", "mock/echo", "-s", str(run.session), *args]
+        argv = ["akern", "-m", "mock/echo", "-s", str(run.session), *args]
         with open(run.events_path, "w") as out, open(run.stderr_path, "w") as err:
             proc = subprocess.Popen(argv, cwd=self.dir, env={**self.env, "TMPDIR": str(self.dir), **(env or {})},
                                     stdin=subprocess.PIPE, stdout=out, stderr=err, text=True)
@@ -187,18 +187,18 @@ class Kernel:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            pytest.fail(f"akern-loop hung for {timeout}s; events in {run.events_path}")
+            pytest.fail(f"akern hung for {timeout}s; events in {run.events_path}")
         for t in threads:
             t.join(timeout)
             t.reraise()
-        assert exited == code, f"akern-loop exited {exited}: {run.stderr}"
+        assert exited == code, f"akern exited {exited}: {run.stderr}"
         assert not (found := run.violations()), "invariants broken:\n" + "\n".join(found)
         return run
 
 
 @pytest.fixture(scope="session")
 def akern_env():
-    missing = [p for p in ("bin/akern-loop", "bin/akern-edit", "providers/mock") if not (BUILD / p).exists()]
+    missing = [p for p in ("bin/akern", "bin/akern-edit", "system/providers/mock") if not (BUILD / p).exists()]
     if missing:
         pytest.exit(f"not built ({', '.join(missing)} missing): run make first", returncode=2)
     env = {k: v for k, v in os.environ.items()
@@ -214,14 +214,15 @@ def kernel(tmp_path, akern_env):
 
 
 class Home:
-    """An AKERN_HOME of a test's own: the built providers behind a mock that records each request."""
+    """An AKERN_HOME of a test's own: the built system/ behind a user-layer mock that records each request."""
 
     def __init__(self, dir):
         self.dir = dir
         self.requests_path = dir / "requests.jsonl"
-        (dir / "providers").mkdir(parents=True)
-        for built in (BUILD / "providers").iterdir():
-            (dir / "providers" / built.name).symlink_to(built)
+        (dir / "system").mkdir(parents=True)
+        for built in (BUILD / "system").iterdir():
+            (dir / "system" / built.name).symlink_to(built)
+        (dir / "providers").mkdir()
         self.mock("")
         self.env = {"AKERN_HOME": str(dir)}
 
@@ -230,7 +231,7 @@ class Home:
         path = self.dir / "providers" / "mock"
         path.unlink(missing_ok=True)
         path.write_text(f'#!/bin/sh\n{script}\nrequest=$(cat)\nprintf "%s\\n" "$request" >> "{self.requests_path}"\n'
-                        f'printf "%s" "$request" | exec "{BUILD / "providers" / "mock"}"\n')
+                        f'printf "%s" "$request" | exec "{BUILD / "system" / "providers" / "mock"}"\n')
         path.chmod(0o755)
 
     @property

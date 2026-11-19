@@ -1,4 +1,4 @@
-/* sink: everything the kernel writes to stdout (akern-loop.md §4): the
+/* sink: everything the kernel writes to stdout (akern.md §4): the
    event stream or, with -p, only each run's answer, with a failed run's error on stderr. Owns
    formatting events, the stdout backlog and whether the frontend has fallen too far behind,
    and the last blocking flush. Knows nothing of the modules that write to it; what an event

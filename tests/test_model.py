@@ -1,4 +1,4 @@
-"""The akern front end's default model: AKERN_MODEL, then $AKERN_HOME/model, then akern-model's picker on the terminal."""
+"""The akern-cli front end's default model: AKERN_MODEL, then $AKERN_HOME/model, then akern-model's picker on the terminal."""
 
 import contextlib
 import os
@@ -28,8 +28,10 @@ QUIET = "#!/bin/sh\nexit 0\n"
 def home(tmp_path):
     home = tmp_path / "home"
     (home / "providers").mkdir(parents=True)
-    (home / "render.jq").symlink_to(BUILD / "render.jq")
-    (home / "providers" / "mock").symlink_to(BUILD / "providers" / "mock")
+    (home / "system" / "providers").mkdir(parents=True)
+    (home / "system" / "render.jq").symlink_to(BUILD / "system" / "render.jq")
+    for layer in (home, home / "system"):
+        (layer / "providers" / "mock").symlink_to(BUILD / "system" / "providers" / "mock")
     for name, text in {"fake": FAKE, "broken": BROKEN, "silent": SILENT_FAILURE, "quiet": QUIET}.items():
         (home / "providers" / name).write_text(text)
         (home / "providers" / name).chmod(0o755)
@@ -112,20 +114,20 @@ PROVIDERS = ("  1) broken  \x1b[2m(unavailable: BROKEN_KEY is not set)\x1b[0m\n"
 
 def test_the_environment_beats_the_file(env, home):
     (home / "model").write_text("fake/from-file\n")
-    run = detached(["akern", "hello"], {**env, "AKERN_MODEL": "fake/from-env"})
+    run = detached(["akern-cli", "hello"], {**env, "AKERN_MODEL": "fake/from-env"})
     assert run.returncode == 0, run.stderr
     assert "model from-env" in run.stdout
 
 
 def test_the_file_beats_the_picker(env, home):
     (home / "model").write_text("fake/from-file\nignored\n")
-    run = detached(["akern", "hello"], env)
+    run = detached(["akern-cli", "hello"], env)
     assert run.returncode == 0, run.stderr
     assert "model from-file" in run.stdout
 
 
 def test_with_neither_the_front_end_asks_and_without_a_terminal_it_fails(env, home):
-    run = detached(["akern", "hello"], env)
+    run = detached(["akern-cli", "hello"], env)
     assert (run.returncode, run.stdout, run.stderr) == (1, "", "akern-model: no model set\n")
     assert not (home / "model").exists()
 
@@ -207,6 +209,7 @@ def test_the_picker_asks_even_with_a_default_and_ctrl_d_keeps_it(env, home, term
 def test_with_no_provider_ready_the_picker_shows_why_and_fails(env, home, terminal):
     for name in ("fake", "mock", "quiet"):
         (home / "providers" / name).unlink()
+    (home / "system" / "providers" / "mock").unlink()
     t = terminal(["akern-model"], env)
     assert t.finish() == 1
     assert t.text == ("  1) broken  \x1b[2m(unavailable: BROKEN_KEY is not set)\x1b[0m\n"
@@ -214,8 +217,8 @@ def test_with_no_provider_ready_the_picker_shows_why_and_fails(env, home, termin
                       "akern-model: no provider is ready\n")
 
 
-def test_a_bare_akern_asks_for_a_model_the_first_time_then_runs_with_it(env, home, terminal):
-    t = terminal(["akern", "hello"], env)
+def test_a_bare_akern_cli_asks_for_a_model_the_first_time_then_runs_with_it(env, home, terminal):
+    t = terminal(["akern-cli", "hello"], env)
     t.until("Provider [1-5]: ")
     t.type("2")
     t.until("Model [1-3]: ")
