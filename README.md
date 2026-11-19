@@ -17,23 +17,23 @@ turn, and sub-agents all come from processes and one `poll(2)` loop.
 
 ```sh
 make            # everything under build/, laid out as an AKERN_HOME
-make smoke      # scenario tests against the mock provider
-./akern.sh      # the first time, asks for a model and saves it in build/model
-ANTHROPIC_API_KEY=… ./akern.sh "what does this repo do?"
-echo "what does this repo do?" | AKERN_HOME=build build/bin/akern-loop -m anthropic/claude-opus-5-5 | build/render.jq
+make test      # scenario tests against the mock provider
+./akern.sh      # no env vars needed; the first time, asks for a model and saves it in build/model
+./akern.sh "what does this repo do?"
 ```
 
-`./akern.sh` runs `akern` with `AKERN_HOME=build` and `build/bin` first on
-`PATH`. With no `AKERN_MODEL` and no `build/model`, it lists the providers
-(marking the ones that cannot be used, and why) and their models on the
-terminal, and saves the choice. `AKERN_HOME=build build/bin/akern-model`
-asks again, with `provider/model` it sets the model without asking, and
-`AKERN_MODEL` overrides it for one run.
+`./akern.sh` sets `AKERN_HOME=build` and puts `build/bin` first on `PATH`
+itself, so it runs from a fresh checkout with no environment setup. With no
+`build/model` it lists the providers (marking the ones that cannot be used,
+and why) and their models, and saves your choice. To change it later, run
+`./akern.sh` with `AKERN_MODEL=provider/model` for one run, or run
+`build/bin/akern-model` (with `AKERN_HOME=build`) to pick again, or pass it
+`provider/model` to set it without asking.
 
 | Target | Does |
 |---|---|
 | `make` | `build/bin/` (`akern-loop`, `akern-edit`, `akern`, `akern-model`), `build/providers/`, `build/skills/`, `build/render.jq`, `build/system.md` |
-| `make smoke` | pytest in `build/venv` over `tests/`. After every test, `tests/invariants.py` checks each session and event log: every `tool_use` answered in the next message in call order, every `tool_pending` closed by one `job_result`, no `tool_use` in an aborted message, one provider stream at a time, every `tool_start` ended, `run_end.error` set exactly when the reason is `error`. `tests/bin/gate PATH` blocks until the test creates PATH, so a test decides when each call finishes |
+| `make test` | pytest in `build/venv` over `tests/`. After every test, `tests/invariants.py` checks each session and event log: every `tool_use` answered in the next message in call order, every `tool_pending` closed by one `job_result`, no `tool_use` in an aborted message, one provider stream at a time, every `tool_start` ended, `run_end.error` set exactly when the reason is `error`. `tests/bin/gate PATH` blocks until the test creates PATH, so a test decides when each call finishes |
 | `make asan` | the same tests against `build/asan/`, built with AddressSanitizer and UBSan; fails on any report (`build/asan/sanitizer.*`). The two trees share no objects, so switching needs no `make clean` |
 | `make lines` | counts the kernel's lines |
 | `make install` | [tools.md §3](docs/tools.md#install) |

@@ -73,13 +73,13 @@ asan:
 	@rm -f $(ASAN_ROOT)/sanitizer.*
 	ASAN_OPTIONS=detect_leaks=0:log_path=$(abspath $(ASAN_ROOT))/sanitizer \
 	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:log_path=$(abspath $(ASAN_ROOT))/sanitizer \
-	$(MAKE) ROOT=$(ASAN_ROOT) CFLAGS="-std=c99 -O1 -g -Wall -Wextra -Wpedantic $(SANITIZE)" LDFLAGS="$(SANITIZE)" smoke
+	$(MAKE) ROOT=$(ASAN_ROOT) CFLAGS="-std=c99 -O1 -g -Wall -Wextra -Wpedantic $(SANITIZE)" LDFLAGS="$(SANITIZE)" test
 	@! ls $(ASAN_ROOT)/sanitizer.* 2>/dev/null
 
 $(PYTEST):
 	python3 -m venv $(VENV) && $(VENV)/bin/pip install -q --disable-pip-version-check pytest
 
-smoke: all $(PYTEST)
+test: all $(PYTEST)
 	AKERN_BUILD=$(abspath $(ROOT)) PYTHONDONTWRITEBYTECODE=1 $(PYTEST) -q -p no:cacheprovider tests
 
 lines:
@@ -98,4 +98,4 @@ install: all
 clean:
 	rm -rf $(ROOT) 2>/dev/null || rm -rf $(ROOT)
 
-.PHONY: all asan smoke lines install clean
+.PHONY: all asan test lines install clean
