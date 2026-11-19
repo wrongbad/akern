@@ -1,0 +1,63 @@
+#!/bin/sh
+export LC_ALL=C
+home=$(CDPATH= cd -- "${AKERN_HOME:-$HOME/.akern}" && pwd) || exit
+started=
+
+section() {
+    if [ -n "$started" ]; then echo; fi
+    started=1
+}
+
+put() {
+    cat "$1" || exit
+    if [ -n "$(tail -c 1 "$1")" ]; then echo; fi
+}
+
+field() {
+    awk -v key="$1:" 'NR == 1 { if ($0 != "---") exit; next }
+        $0 == "---" { exit }
+        index($0, key) == 1 { value = substr($0, length(key) + 1); sub(/^ +/, "", value); print value; exit }' "$2"
+}
+
+skills() {
+    for file in "$1"/*/SKILL.md; do
+        dir=${file%/SKILL.md}
+        if [ -f "$file" ] && { [ -z "$2" ] || [ ! -d "$2/${dir##*/}" ]; }; then
+            name=$(field name "$file")
+            printf '%s\n' "- ${name:-${dir##*/}}: $(field description "$file") ($file)"
+        fi
+    done
+}
+
+if [ -s "$home/system.md" ]; then
+    section
+    put "$home/system.md"
+fi
+
+list=$(skills "$home/skills"; skills "$home/system/skills" "$home/skills")
+if [ -n "$list" ]; then
+    section
+    printf "Skills: read a skill's file before relying on it.\n%s\n" "$list"
+fi
+
+dir=$PWD
+dirs=$dir
+while [ ! -e "$dir/.git" ] && [ "$dir" != / ]; do
+    dir=$(dirname "$dir")
+    dirs="$dir
+$dirs"
+done
+if [ ! -e "$dir/.git" ]; then dirs=$PWD; fi
+
+set -f
+IFS='
+'
+for dir in $dirs; do
+    file=${dir%/}/AGENTS.md
+    if [ ! -f "$file" ]; then file=${dir%/}/CLAUDE.md; fi
+    if [ -s "$file" ]; then
+        section
+        printf '# %s\n\n' "$file"
+        put "$file"
+    fi
+done

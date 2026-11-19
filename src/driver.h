@@ -6,8 +6,9 @@
    it for a note and sends the request again, a few times at most.
    Owns every append to the session and the ok that answers an append command, holding one
    that names a parent until a turn boundary. Also owns the provider settings the set command
-   changes: model, system prompt path and params, which start from the config, and the
-   AKERN_MODEL children inherit. Running tools is calls'; queueing is inbox's; storage is
+   changes: model, system prompt text and params, which start from the config, and the
+   AKERN_MODEL children inherit. The system text is read once at open: the -S file, else the
+   output of the prompt program found in AKERN_HOME, run to completion before the loop starts. Running tools is calls'; queueing is inbox's; storage is
    session's.
    run = from a delivery while idle to run_end; turn = one provider request and its reply;
    quiescent = idle, with nothing due and no job running. */
@@ -35,7 +36,8 @@ typedef struct driver {
     bool            last_run_failed;
     struct held_entry *held;
     size_t          nheld, capheld;
-    char           *provider_model, *system_path;
+    char           *provider_model;
+    buf             system;
     json_list       param_members;
     const config   *config;
     struct sink    *sink;
@@ -46,7 +48,7 @@ typedef struct driver {
 } driver;
 
 void driver_open(driver *d);
-void driver_set(driver *d, json model, json system_path, json params);
+bool driver_set(driver *d, json model, json system_path, json params);
 bool driver_append(driver *d, const char *type, const char *parent_id, const json_list *members, json ref);
 bool driver_advance(driver *d);
 void driver_abort(driver *d, enum abort_jobs jobs);

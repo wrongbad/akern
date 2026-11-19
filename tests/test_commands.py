@@ -121,6 +121,19 @@ def test_set_changes_the_model_and_replaces_params_from_the_next_request(kernel,
     assert run.entries_of("message")[-1]["meta"]["model"] == "mock/other"
 
 
+def test_set_reads_a_system_file_when_it_arrives_and_changes_nothing_when_it_cannot(kernel, home, tmp_path):
+    (tmp_path / "old.md").write_text("old")
+    new = tmp_path / "new.md"
+    new.write_text("new")
+    run = kernel("first", "-S", "old.md", env=home.env,
+                 later=[(seen("run_end"), command("set", system="new.md", ref=1)),
+                        (seen("ok"), lambda run: new.unlink() or command("set", system="new.md", model="mock/other", ref=2)),
+                        (0, "second")])
+    assert [(r["model"], r["system"]) for r in home.requests] == [("echo", "old"), ("echo", "new")]
+    assert run.events_of("ok") == [{"type": "ok", "ref": 1}]
+    assert run.events_of("error") == [command_error("system file cannot be read", ref=2)]
+
+
 def test_append_writes_at_the_head_or_as_a_new_root_and_replies_only_with_a_ref(kernel):
     run = kernel(command("append", entry={"type": "x-note", "text": "a"}),
                  later=[(0, command("append", entry={"type": "x-note", "text": "b", "id": "forged"}, ref="b")),

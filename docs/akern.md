@@ -25,19 +25,20 @@ session file.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AKERN_HOME` | `$HOME/.akern` (`./.akern` without `HOME`) | user layer: `providers/<name>` and `system.md`, preferred over the same names in `$AKERN_HOME/system/` (the layer `make install` writes) |
+| `AKERN_HOME` | `$HOME/.akern` (`./.akern` without `HOME`) | user layer: `providers/<name>` and `prompt`, preferred over the same names in `$AKERN_HOME/system/` (the layer `make install` writes) |
 | `AKERN_MODEL` | none | `provider/model` when `-m` is absent. Neither given: exit 2. The kernel never reads `$AKERN_HOME/model`; the `akern-cli` front end turns it into this variable ([tools.md §4](tools.md#4-the-akern-cli-front-end)) |
 | `AKERN_RECURSION_LIMIT` | `4` | kernels that may still nest, this one included. `0`, negative or non-numeric: exit 2 |
 | `TMPDIR` | `/tmp` | directory of the anonymous session |
 
 ### Set for children
 
-Children are the provider and `exec` programs. Both variables exist so
-that a nested kernel picks up where its parent is; everything else passes
-through unchanged.
+Children are the prompt program, the provider and `exec` programs. These
+variables exist so that a child finds the home in use and a nested kernel
+picks up where its parent is; everything else passes through unchanged.
 
 | Variable | Value |
 |---|---|
+| `AKERN_HOME` | the home in use, as resolved above |
 | `AKERN_MODEL` | current `provider/model`; follows `set` |
 | `AKERN_RECURSION_LIMIT` | the value read, minus 1 |
 
@@ -57,9 +58,27 @@ or bad value, or a `-P` without `key=`: usage on stderr, exit 2.
 | `-p`, `--print` | off | print mode: stdout per [§4](#print-mode); exits after it has run once and is quiescent, without waiting for EOF |
 | `-s`, `--session path` | `$TMPDIR/akern-session-XXXXXX` | session file. Created if missing; locked through `path.owner`. Owned by another kernel: exit 2 |
 | `-m`, `--model provider/model` | `$AKERN_MODEL` | runs `$AKERN_HOME/providers/<provider>`, else `$AKERN_HOME/system/providers/<provider>`; the request's `model` is the part after `/` |
-| `-S`, `--system path` | `$AKERN_HOME/system.md`, else `$AKERN_HOME/system/system.md` | system prompt file, read again for every request. Unreadable or missing: `system` is `null` |
+| `-S`, `--system path` | the prompt program's output ([below](#system-prompt)) | system prompt file, read verbatim once at startup; the prompt program is not run. Unreadable: exit 2 |
 | `-P`, `--param key=value` | | repeatable. A provider param in the request's `params`. `value` is sent as JSON when it is a JSON value (`max_tokens=64` is the number 64, `thinking={"type":"adaptive"}` an object), else as a string (`effort=high`) |
 | `prompt...` | | words joined by spaces, queued as `source: prompt`, `when: idle`, before stdin is read |
+
+### System prompt
+
+The request's `system` is fixed at startup, before the session is opened and
+before any signal handler is installed: the `-S` file's bytes, else the output
+of the **prompt program**, `$AKERN_HOME/prompt` if it is executable, else
+`$AKERN_HOME/system/prompt`. Empty, or no program in either place: `system`
+is `null`. Only `set` changes it later ([§3](#set)).
+
+| Rule | |
+|---|---|
+| run | once, to completion, with no arguments, in the kernel's working directory and environment ([§1](#set-for-children)) |
+| stdin | empty |
+| stdout | the system text, as opaque bytes |
+| stderr | the kernel's stderr |
+| failure | a failed `exec`, an exit other than 0, or a signal: `akern: PATH: exit N` (or `signal N`) on stderr, exit 2 |
+
+What the shipped program writes: [tools.md §3](tools.md#the-prompt-program).
 
 ### Limit flags
 
@@ -105,7 +124,7 @@ sub-agents are in use to give it time.
 |---|---|
 | `0` | the last run did not end in `error`, or there was no run |
 | `1` | the last run ended in `error`; or a session append failed |
-| `2` | bad usage, no model, recursion limit, session cannot be opened or is owned, fatal system error. `akern: <reason>` on stderr |
+| `2` | bad usage, no model, recursion limit, unreadable `-S` file, failed prompt program, session cannot be opened or is owned, fatal system error. `akern: <reason>` on stderr |
 | `130` | shutdown by signal |
 
 ## 3. Stdin
@@ -205,11 +224,12 @@ Change the request settings from the next request on. Nothing restarts, so jobs 
 | Field | Type | Required | Default | Meaning |
 |---|---|---|---|---|
 | `model` | string | no | unchanged | `provider/model`; also exported as `AKERN_MODEL` |
-| `system` | string | no | unchanged | path of the system prompt file |
+| `system` | string | no | unchanged | path of a file, read when the command arrives; its bytes are the system prompt from the next request, `null` when empty |
 | `params` | object | no | unchanged | replaces all provider params, `-P` ones included; values keep their JSON types, as with `-P` |
 
 A `model` or `system` that is not a string, or `params` that is not an object,
-is ignored. Reply `ok`.
+is ignored. Reply `ok`, or error `system file cannot be read`, and then nothing
+changes.
 
 ### append
 
@@ -251,6 +271,7 @@ The `ref` is added as the last field. With `-p`, no reply is written.
 | `when must be now, turn, idle or deferred` | `send` |
 | `source must be prompt or inject` | `send`, `prompt`, `steer` |
 | `no such job` | `kill` |
+| `system file cannot be read` | `set` |
 | `entry needs a type, and parent must be null or an existing id` | `append` |
 
 ## 4. Stdout
@@ -502,11 +523,12 @@ With `-p` nothing above is written. Instead:
 
 ```
 providers/<name>                   yours: the program -m <name>/… starts (providers.md)
-system.md                          yours: the system prompt without -S
+prompt                             yours: the program whose output is the system prompt (§2)
+system.md, skills/<name>/          yours: read by the shipped prompt, not the kernel (tools.md §3)
 system/                            what `make` builds and `make install` copies:
   providers/<name>                 used where providers/<name> above is missing
-  system.md                        used where system.md above is missing; lists
-                                   each system/skills/<name>/SKILL.md (tools.md §3)
+  prompt                           used where prompt above is missing (tools.md §3)
+  skills/<name>/SKILL.md           listed by the shipped prompt
 ```
 
 ### Layout

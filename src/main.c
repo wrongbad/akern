@@ -56,7 +56,7 @@ static void usage(void)
           "  -p, --print              print each run's final answer instead of the event stream\n"
           "  -s, --session PATH       session file (default: a new one in $TMPDIR)\n"
           "  -m, --model P/M          provider/model (default: $AKERN_MODEL)\n"
-          "  -S, --system PATH        system prompt file (default: $AKERN_HOME/system.md, else $AKERN_HOME/system/system.md)\n"
+          "  -S, --system PATH        system prompt file (default: the output of $AKERN_HOME/prompt, else $AKERN_HOME/system/prompt)\n"
           "  -P, --param KEY=VALUE    provider parameter; VALUE is sent as JSON if it is JSON, else as a string\n"
           "      --max-processes N    exec programs running at once (default 32)\n"
           "      --kill-grace SECONDS from SIGTERM to SIGKILL (default 2)\n"
@@ -111,13 +111,6 @@ static char *home_dir(void)
     return path.p;
 }
 
-static char *home_file(const config *cfg, const char *name)
-{
-    buf path = { 0 };
-    buf_printf(&path, "%s/%s", cfg->home_dir, name);
-    return path.p;
-}
-
 static char *new_session_path(void)
 {
     const char *tmp_dir = getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
@@ -151,11 +144,6 @@ static int parse_args(config *cfg, int argc, char **argv)
     if (cfg->recursion_limit <= 0)
         die("recursion limit reached: this kernel would be nested too deep (AKERN_RECURSION_LIMIT)");
     cfg->home_dir = home_dir();
-    if (!cfg->system_path) {
-        char *own = home_file(cfg, "system.md");
-        if (access(own, R_OK) == 0) cfg->system_path = own;
-        else free(own), cfg->system_path = home_file(cfg, "system/system.md");
-    }
     if (!cfg->session_path) cfg->session_path = new_session_path();
     buf_cstr(&cfg->param_members);
     return optind;
@@ -167,11 +155,12 @@ static void keep_std_fds_open(void)
         if (fcntl(fd, F_GETFD) < 0 && open("/dev/null", O_RDWR) != fd) die("cannot open /dev/null");
 }
 
-static void export_recursion_limit(const config *cfg)
+static void export_for_children(const config *cfg)
 {
     char below[16];
     snprintf(below, sizeof below, "%d", cfg->recursion_limit - 1);
     setenv("AKERN_RECURSION_LIMIT", below, 1);
+    setenv("AKERN_HOME", cfg->home_dir, 1);
 }
 
 static void wire(struct kernel *k)
@@ -207,12 +196,12 @@ int main(int argc, char **argv)
     struct kernel k = { 0 };
     int first = parse_args(&k.config, argc, argv);
     keep_std_fds_open();
+    export_for_children(&k.config);
     wire(&k);
+    driver_open(&k.driver);
     loop_open(&k.loop);
     sink_open(&k.sink, k.config.print_answers);
     session_open(&k.session);
-    driver_open(&k.driver);
-    export_recursion_limit(&k.config);
     event(&k.sink, "{'type':'hello','protocol':1,'session':%s,'head':%s,'model':%s}",
           k.config.session_path, session_head_id(&k.session), k.driver.provider_model);
     queue_argv_prompt(&k.inbox, argc - first, argv + first);

@@ -338,7 +338,7 @@ static void on_exec_exit(worker *w)
     c->exit_kind = WIFSIGNALED(w->wait_status) ? "signal" : "exit";
     c->exit_code = WIFSIGNALED(w->wait_status) ? WTERMSIG(w->wait_status) : WEXITSTATUS(w->wait_status);
     c->status.n = 0;
-    proc_describe_exit(w, &c->status);
+    proc_describe_status(w->wait_status, &c->status);
     c->calls->running_execs--;
     free_if_unreferenced(c);
 }

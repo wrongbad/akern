@@ -71,8 +71,10 @@ and messages that interrupt a turn are part of the kernel from the start.
    markers) intact for free.
 9. **Discovery by `PATH` and one directory.** Put an `akern-*` tool on `PATH`
    and it can be used. Drop a provider in `~/.akern/providers/` and the next
-   request can use it. The system prompt is a file, `~/.akern/system.md`, else
-   `~/.akern/system/system.md`. No registry, no manifest, no reload command.
+   request can use it. The system prompt is a program's output: the kernel
+   runs `~/.akern/prompt`, else `~/.akern/system/prompt`, once at startup, and
+   what assembles the prompt (skills, `AGENTS.md`, your own text) is that
+   program's business. No registry, no manifest, no reload command.
 10. **Fail closed.** A broken permission gate must never mean "allowed": a shim
     that crashes runs nothing, and a sandbox that fails to start starts no kernel.
 11. **If the model can do it, we don't ship it.** The system provides only
@@ -164,7 +166,7 @@ that for this repository.
 | Concern | Where it lives |
 |---|---|
 | Talking to a model API, auth, retries, cache breakpoints | the provider |
-| `AGENTS.md`, skills, system prompt assembly | `$AKERN_HOME/system.md` or `-S`, written ahead of time; a wrapping provider per request |
+| `AGENTS.md`, skills, system prompt assembly | the prompt program, run once at startup: `$AKERN_HOME/prompt`, else the shipped `$AKERN_HOME/system/prompt`; or a fixed file with `-S`; a wrapping provider per request |
 | Prompt templates, `!cmd`, `@file` expansion | the frontend |
 | How pending calls and job results are worded | the provider |
 | Permission gates, path protection, sandboxing | an OS sandbox around the whole kernel, or a shim on `PATH` |
@@ -193,7 +195,7 @@ a result. Interception is built in user space, at the seams it already has.
 | Pi hook point | Here |
 |---|---|
 | `input` | the front end rewrites a prompt before it sends it |
-| `request` | a wrapping provider; a fixed system prompt is `$AKERN_HOME/system.md` |
+| `request` | a wrapping provider; the system prompt is the prompt program's output, fixed at startup and changed only by `set` |
 | `tool_call` | a shim on `PATH`; an OS sandbox around the whole kernel |
 | `tool_result` | a shim on `PATH` that filters its program's output |
 | `turn_end` | the front end, on the `turn_end` event: logging, checkpoints |

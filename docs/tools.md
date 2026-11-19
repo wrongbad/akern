@@ -209,37 +209,62 @@ description: Background jobs, interactive programs and sub-agents — …
 
 | Item | Rule |
 |---|---|
-| location | `$AKERN_HOME/system/skills/<name>/SKILL.md` (`skills/<name>/SKILL.md` in the repository) |
-| header | `name:` (default: the directory name) and `description:`, one line each |
-| `system.md` | `Skills: read a skill's file before relying on it.`, then one line per skill: `- NAME: DESCRIPTION (absolute path of SKILL.md)`. No skills: no file |
-| use | `system.md` is the system prompt without `-S`; the model reads a skill's file with `read` before relying on it, so only the list costs context on every request |
+| location | yours in `$AKERN_HOME/skills/<name>/SKILL.md`, then the shipped ones in `$AKERN_HOME/system/skills/<name>/SKILL.md` (`skills/<name>/SKILL.md` in the repository). A directory in `skills/` hides the shipped skill of the same name, with or without a `SKILL.md` |
+| header | `name:` (default: the directory name) and `description:`, one line each, in the front matter between the first two `---` lines |
+| list | `Skills: read a skill's file before relying on it.`, then one line per skill: `- NAME: DESCRIPTION (absolute path of SKILL.md)`; yours, then the shipped ones, each in byte order of directory name. No skills: no list |
+| use | the [prompt program](#the-prompt-program) puts the list in the system prompt; the model reads a skill's file with `read` before relying on it, so only the list costs context on every request |
 
 | Shipped | Covers |
 |---|---|
 | `skills/akern` | jobs (`wait: false`, `tail`, `kill`), talking to a running program (`stdin_open`, `write {job}`), sub-agents as `akern -p` ([akern.md](akern.md#sub-agents)) |
 | `skills/files` | `akern-edit`, editing tips, images and PDFs through `read`'s `type` and `exec`'s `stdout_type`, searching with ordinary programs |
 
+### The prompt program
+
+`tools/prompt`, `sh`, shipped as `$AKERN_HOME/system/prompt`: the kernel runs
+it once at startup, and its output is the system prompt
+([akern.md §2](akern.md#system-prompt)). It reads markdown and runs nothing
+from the project. Its parts, in order, separated by a blank line, each ending
+in a newline:
+
+| Part | Content |
+|---|---|
+| your text | `$AKERN_HOME/system.md`, verbatim, when not empty |
+| skills | the [list](#3-skills) |
+| context files | for each directory from the repository root (the nearest ancestor of the working directory, itself included, that has a `.git`) down to the working directory, outermost first: its `AGENTS.md`, else its `CLAUDE.md`, when not empty, under a heading `# ABSOLUTE PATH`. Outside a repository, the working directory alone |
+
+The output depends only on these files, so kernels started on the same files
+send the same prompt and keep the provider's cache warm. Your own
+`$AKERN_HOME/prompt` replaces this program; it can run it first
+(`~/.akern/system/prompt`) and add to its output.
+
 ### Install
 
-| `make` | `make install` (`PREFIX=/usr/local`, `HOME_DIR=~/.akern`) |
+| `make` | `make install` (`PREFIX=/usr/local`, `AKERN_HOME=~/.akern`) |
 |---|---|
 | `build/bin/`: `akern`, `akern-edit`, `akern-cli`, `akern-model` | the same programs into `$PREFIX/bin` |
-| `build/system/`: `providers/`, `skills/`, `render.jq`, `README.md` (from `home/README.md`: the layout and how to override) | copied to `$HOME_DIR/system/`, which is removed first |
-| `build/system/system.md`, listing `build/system/skills` | written again at install, listing `$HOME_DIR/system/skills` |
+| `build/system/`: `providers/`, `skills/`, `render.jq`, `prompt`, `README.md` (from `home/README.md`: the layout and how to override) | copied to `$AKERN_HOME/system/`, which is removed first |
 
-`build/` has the layout of an installed `$HOME_DIR`, so `AKERN_HOME=build`
+`build/` has the layout of an installed `$AKERN_HOME`, so `AKERN_HOME=build`
 (what `./akern-dev.sh` sets) runs the build as if installed.
-`$HOME_DIR/system` is the base layer and belongs to `make install`, which
+`AKERN_HOME` is the variable `akern` reads, so one exported in the shell
+sets both where `make install` writes and where the programs look. An
+`AKERN_HOME` that is the build directory fails `make install` and
+`make uninstall`.
+`$AKERN_HOME/system` is the base layer and belongs to `make install`, which
 replaces it whole: a file dropped from a release does not linger. The user
-layer is `$HOME_DIR` itself, looked up first: `providers/<name>`, `render.jq`,
-`system.md`. A shadowing file is reported by the install. Install writes
-nothing there, and removes only what an install from before `system/` left:
-a provider, `render.jq` or `system.md` byte-identical to the new one in
-`system/` is deleted and reported; one that differs at all is kept and
-reported as shadowing. Skills stay in `system/skills`; a `system.md` of your
-own must list its own skills. Neither `make` nor `make install` writes `model`
-([§4](#4-the-akern-cli-front-end)); `make clean` removes `build/`, and with it
-`build/model`.
+layer is `$AKERN_HOME` itself, looked up first: `providers/<name>`, `render.jq`,
+`prompt`, and what the shipped `prompt` reads, `system.md` and `skills/`. A
+shadowing file is reported by the install. Install writes nothing there, and
+removes only a copy that changes nothing: a provider, `render.jq` or `prompt`
+byte-identical to the new one in `system/` is deleted and reported; one that
+differs at all is kept and reported as shadowing. Neither `make` nor
+`make install` writes `model` ([§4](#4-the-akern-cli-front-end)); `make clean`
+removes `build/`, and with it `build/model`.
+
+`make uninstall` removes the programs from `$PREFIX/bin` and
+`$AKERN_HOME/system`, then `$AKERN_HOME` only if nothing is left in it: the user
+layer, `model` and anything else of yours stay, and the uninstall says so.
 
 ## 4. The akern-cli front end
 

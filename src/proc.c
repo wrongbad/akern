@@ -103,6 +103,27 @@ worker *proc_spawn(procs *ps, const spawn_req *r)
     return w;
 }
 
+int proc_run(const char *path, buf *out)
+{
+    int in[2], from_child[2], wait_status;
+    char chunk[65536];
+    make_pipe(in);
+    make_pipe(from_child);
+    pid_t pid = fork();
+    if (pid == 0) exec_child(&(spawn_req){ .path = path }, in[0], from_child[1], 2);
+    if (pid < 0) die("fork: %s", strerror(errno));
+    close(in[0]);
+    close(in[1]);
+    close(from_child[1]);
+    for (ssize_t n; (n = read(from_child[0], chunk, sizeof chunk)) != 0;)
+        if (n > 0) buf_put(out, chunk, (size_t)n);
+        else if (errno != EINTR) break;
+    close(from_child[0]);
+    while (waitpid(pid, &wait_status, 0) < 0)
+        if (errno != EINTR) die("waitpid: %s", strerror(errno));
+    return wait_status;
+}
+
 static void signal_worker(worker *w, int sig)
 {
     if (!w->group_empty && kill(-w->pid, sig) < 0 && errno == ESRCH) w->group_empty = true;
@@ -282,9 +303,9 @@ bool proc_succeeded(const worker *w)
     return WIFEXITED(w->wait_status) && WEXITSTATUS(w->wait_status) == 0 && w->kill_stage == NOT_KILLED;
 }
 
-void proc_describe_exit(const worker *w, buf *text)
+void proc_describe_status(int wait_status, buf *text)
 {
-    if (WIFEXITED(w->wait_status)) buf_printf(text, "exit %d", WEXITSTATUS(w->wait_status));
-    else if (WIFSIGNALED(w->wait_status)) buf_printf(text, "signal %d", WTERMSIG(w->wait_status));
+    if (WIFEXITED(wait_status)) buf_printf(text, "exit %d", WEXITSTATUS(wait_status));
+    else if (WIFSIGNALED(wait_status)) buf_printf(text, "signal %d", WTERMSIG(wait_status));
     else buf_puts(text, "unknown");
 }

@@ -1,4 +1,4 @@
-from conftest import BUILD
+from conftest import seen
 
 
 def answer(text):
@@ -37,13 +37,41 @@ def test_a_provider_in_akern_home_shadows_the_one_of_the_same_name_in_system(ker
     assert run.events_of("run_end")[0]["reason"] == "done"
 
 
-def test_the_system_prompt_is_system_md_in_akern_home_then_in_system_unless_s_names_a_file(kernel, home, tmp_path):
-    (home.dir / "system.md").write_text("from home")
-    (tmp_path / "chosen.md").write_text("chosen")
+def test_the_system_prompt_is_the_output_of_the_first_prompt_program_and_null_when_empty_or_missing(kernel, home):
+    program = home.dir / "prompt"
+    program.write_text("#!/bin/sh\necho from home\n")
+    program.chmod(0o755)
     kernel("hi", env=home.env)
-    kernel("hi", "-S", "chosen.md", env=home.env)
-    (home.dir / "system.md").unlink()
+    program.write_text("#!/bin/sh\n")
     kernel("hi", env=home.env)
-    (home.dir / "system" / "system.md").unlink()
+    program.unlink()
+    (home.dir / "system" / "prompt").unlink()
     kernel("hi", env=home.env)
-    assert [r["system"] for r in home.requests] == ["from home", "chosen", (BUILD / "system" / "system.md").read_text(), None]
+    assert [r["system"] for r in home.requests] == ["from home\n", None, None]
+
+
+def test_s_reads_its_file_once_and_skips_the_prompt_program(kernel, home, tmp_path):
+    program = home.dir / "prompt"
+    program.write_text(f"#!/bin/sh\ntouch {tmp_path / 'ran'}\n")
+    program.chmod(0o755)
+    chosen = tmp_path / "chosen.md"
+    chosen.write_text("chosen")
+    kernel("first", "-S", "chosen.md", env=home.env,
+           later=[(seen("run_end"), lambda run: chosen.write_text("edited") and "second")])
+    assert [r["system"] for r in home.requests] == ["chosen", "chosen"]
+    assert not (tmp_path / "ran").exists()
+
+
+def test_an_unreadable_s_file_stops_the_kernel_before_it_starts(kernel, home):
+    run = kernel("hi", "-S", "missing.md", env=home.env, code=2)
+    assert run.stderr == "akern: missing.md: No such file or directory\n"
+    assert not home.requests and not run.session.exists()
+
+
+def test_a_failing_prompt_program_stops_the_kernel_before_it_starts(kernel, home):
+    program = home.dir / "prompt"
+    program.write_text("#!/bin/sh\necho partial\necho broken >&2\nexit 3\n")
+    program.chmod(0o755)
+    run = kernel("hi", env=home.env, code=2)
+    assert run.stderr == f"broken\nakern: {program}: exit 3\n"
+    assert not home.requests and not run.session.exists()

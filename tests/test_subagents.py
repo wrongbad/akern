@@ -16,8 +16,8 @@ def test_a_line_written_to_a_sub_agents_stdin_is_answered_while_its_call_runs(ke
     sub_agent = Run(tmp_path / "agents" / "steer.jsonl", printing=True)
     run = kernel(tool("exec", argv=["akern", "-p", "-s", "agents/steer.jsonl", f"!gate {gate}"],
                       wait=False, stdin_open=True),
-                 later=[(seen_pending(), lambda run: tool("write", job=run.pending[0]["tool_use_id"],
-                                                          content="also say hi\n"))],
+                 later=[(lambda run: seen_pending()(run) and sub_agent.entries_of("message")[1:],
+                         lambda run: tool("write", job=run.pending[0]["tool_use_id"], content="also say hi\n"))],
                  during=lambda run: wait_for(lambda: "echo: also say hi" in sub_agent.replies)
                  and gate.write_text("released\n"))
     [wrote] = run.result_texts

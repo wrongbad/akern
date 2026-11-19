@@ -73,10 +73,10 @@ mechanisms, because they are what tests whether the architecture holds.
 
 | Pi feature | Where | Mechanism |
 |---|---|---|
-| `AGENTS.md` / `CLAUDE.md` discovery | User | the `akern-cli` front end adds found files to the system prompt file it passes with `-S`, or a wrapping provider appends them to `system` |
-| System prompt replace / append | Kernel | `$AKERN_HOME/system.md`, `-S file` or `set`; append by editing the file, or in a wrapping provider |
+| `AGENTS.md` / `CLAUDE.md` discovery | User (bundled) | the shipped prompt program, `$AKERN_HOME/system/prompt`, adds `AGENTS.md`, else `CLAUDE.md`, of each directory from the repository root down to the working directory ([tools.md](tools.md#the-prompt-program)) |
+| System prompt replace / append | Kernel + User (bundled) | the kernel runs the prompt program once at startup and sends its output; `-S file` and `set` replace it with a file. Append: `$AKERN_HOME/system.md`, which the shipped program puts first. Replace: your own `$AKERN_HOME/prompt` |
 | Prompt templates (`/name`) | User | the `akern-cli` front end expands `prompts/<name>.md` before sending |
-| Skills (`SKILL.md`) | User (bundled) | `make install` lists skill names and descriptions in `$AKERN_HOME/system/system.md`; the model reads them with `read` |
+| Skills (`SKILL.md`) | User (bundled) | the shipped prompt program lists the names and descriptions of `$AKERN_HOME/skills` and `$AKERN_HOME/system/skills` in the system prompt; the model reads them with `read` |
 | `@file` references | User | the frontend turns them into content blocks |
 | `!cmd` and `!!cmd` | User | frontend runs the command; `!` sends the output as a prompt, `!!` does not |
 | Images | Kernel | content blocks pass through; the frontend creates them |
@@ -112,7 +112,7 @@ mechanisms, because they are what tests whether the architecture holds.
 | Packages (`install`, `remove`, `update`, `list`) | User | `akern-pkg`: programs onto `PATH`, providers and skills into `~/.akern` |
 | Project-local config with trust gate | — | not yet: only `~/.akern` is read ([roadmap.md](roadmap.md#where-settings-live)) |
 | Settings files (global, project) | User | read by the `akern-cli` front end and frontends, exported as environment and flags (`-m`, `-P`) |
-| Hot reload (`/reload`) | Kernel | nothing to do: tools are found on `PATH` per call, the provider and `system.md` per request |
+| Hot reload (`/reload`) | Kernel | tools are found on `PATH` per call and the provider per request; the system prompt is built at startup, so a new skill or `AGENTS.md` needs a new kernel on the same session (`-s`), or `set` with a file |
 
 ## Things pi leaves to extensions
 
@@ -145,7 +145,7 @@ mechanisms, because they are what tests whether the architecture holds.
 | `model_select`, `thinking_level_select` | `set` command; frontends observe it |
 | `user_bash` | frontend |
 | `project_trust` | the `akern-cli` front end |
-| `resources_discover` | `PATH` for programs, `~/.akern` for providers, skills and `system.md` |
+| `resources_discover` | `PATH` for programs, `~/.akern` for providers and the prompt program, which finds skills and context files |
 
 ## Known gaps
 

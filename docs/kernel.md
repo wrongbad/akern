@@ -34,9 +34,9 @@ uses. Modules are listed top-down; the graph is [at the end](#dependency-graph).
 environment: options, defaults, and building the kernel.
 
 **State:** `config`, read-only once the kernel runs: `session_path`,
-`home_dir`, `provider_model`, `system_path`, `param_members`, `max_processes`,
-`kill_grace_seconds`, `max_line_bytes`, `print_answers`, `recursion_limit`.
-What `set` changes lives in the driver.
+`home_dir`, `provider_model`, `system_path` (`-S`, or none), `param_members`,
+`max_processes`, `kill_grace_seconds`, `max_line_bytes`, `print_answers`,
+`recursion_limit`. What `set` changes lives in the driver.
 
 **Points at:** every module.
 
@@ -44,7 +44,7 @@ What `set` changes lives in the driver.
 |---|---|
 | options | flags and environment per [akern.md §1–2](akern.md#1-environment-variables); a bad flag, no model or a spent recursion limit exits 2. Without `-s`, `mkstemp` creates `$TMPDIR/akern-session-XXXXXX` |
 | wire | every module's sibling pointers and `config` |
-| open | `loop_open`, `sink_open`, `session_open`, `driver_open` (exports `AKERN_MODEL`), then exports `AKERN_RECURSION_LIMIT` minus 1 |
+| open | exports `AKERN_HOME` and `AKERN_RECURSION_LIMIT` minus 1; `driver_open` (exports `AKERN_MODEL`, fixes the system text), before `loop_open` installs any signal handler; then `loop_open`, `sink_open`, `session_open` |
 | start | `hello` event; the positional prompt as `inbox_add(FROM_PROMPT, WHEN_IDLE)` |
 | run | `loop_run` |
 | exit | `driver_append_leftover_results`, `sink_flush`, `session_close`; returns the loop's exit code |
@@ -106,7 +106,7 @@ Replies go out through the sink; what a command does belongs to other modules.
 | `send`, `prompt`, `steer` | `inbox_add`, after the `ok` | ctl |
 | `abort` | `driver_abort` | ctl |
 | `kill` | `calls_kill_job` | ctl |
-| `set` | `driver_set` | ctl |
+| `set` | `driver_set`; `false` is an error | ctl |
 | `append` | `driver_append` | ok: driver, when appended; error: ctl |
 | `status` | `driver_status` | ctl |
 
@@ -124,15 +124,15 @@ settings `set` changes.
 `abort_kills_jobs`, `abort_ends_run`); the provider worker, whether it exited,
 its `result` line and `error`; the entry ids of the request's messages
 (`context_ids`) and `block_retries`; the run's `returned` contents and answer
-text; `last_run_failed`; held appends; `provider_model`, `system_path`,
-`param_members`.
+text; `last_run_failed`; held appends; `provider_model`, `system` (the text;
+empty means `null`), `param_members`.
 
 **Points at:** sink, calls, inbox, procs, session; config; msg.
 
 | Function | Contract | Caller |
 |---|---|---|
-| `driver_open(d)` | model, system path and params from `config`; exports `AKERN_MODEL` | main |
-| `driver_set(d, model, system_path, params)` | a string `model` is used from the next request and exported as `AKERN_MODEL`; a string `system_path` replaces the path; an object `params` replaces every param. Anything else is ignored | ctl |
+| `driver_open(d)` | model and params from `config`; exports `AKERN_MODEL`. The system text: the `system_path` file's bytes, else what `proc_run` collects from `prompt` in the home's layers (first executable wins, as for providers), else none. An unreadable file or a failed program: `die` | main |
+| `driver_set(d, model, system_path, params)` | a string `system_path` is read now and its bytes replace the system text; unreadable: `false`, and nothing changes. Otherwise a string `model` is used from the next request and exported as `AKERN_MODEL`, and an object `params` replaces every param. Anything else is ignored | ctl |
 | `driver_append(d, type, parent_id, members, ref)` | `AT_HEAD`: appended now. `AS_ROOT` or an existing id: held, and appended at the next idle step or the next turn that ends without tool calls, before anything is delivered. Each append answers `ok` with its `id` when `ref` is given. An unknown id: `false` | ctl |
 | `driver_advance(d)` | one step of the state machine; `true` if anything moved | loop |
 | `driver_abort(d, jobs)` | requests an abort, acted on at the next step; `KILL_JOBS` also kills every job | ctl, loop |
@@ -155,7 +155,7 @@ text; `last_run_failed`; held appends; `provider_model`, `system_path`,
 | Step | Does |
 |---|---|
 | deliver | appends one user message: the call answers (`calls_take_turn_results`, in `waiting` only), then `inbox_take` of the modes due. `source` is `results`, `inbox` or `results+inbox`; nothing to deliver, no message |
-| begin a turn | `turn` + 1; the request ([providers.md §2](providers.md#2-request)): `session_context` (keeping the messages' entry ids), the system file read now, `calls_tool_schemas`, params; spawn the provider (none found: error, `run_end` `error`); `turn_start` |
+| begin a turn | `turn` + 1; the request ([providers.md §2](providers.md#2-request)): `session_context` (keeping the messages' entry ids), the system text, `calls_tool_schemas`, params; spawn the provider (none found: error, `run_end` `error`); `turn_start` |
 | omit a rejected block | the provider's `error` has `kind: invalid_block` and an `at` ([providers.md §4](providers.md#4-errors)), fewer than 8 have been omitted since the run began or a provider last gave a `result`, `at.message` is an index into the request's messages, and `message_omit_media` finds an image or document there in the entry's current message: append `replace` (`target` the entry, `message` the result) and a `replace` event. Otherwise it is an ordinary failure |
 | settle | a turn ended without tool calls, or the provider failed: held appends; any `now`, `turn` or `idle` item due → deliver, begin a turn; otherwise `run_end` (`done`, or `error` after a failure) → `idle`, and `sink_answer` with the run's last assistant text |
 
@@ -299,10 +299,12 @@ and whether it failed; behavior and error texts:
 
 ## proc
 
-`src/proc.c`. Every child process, providers and `exec` programs alike:
-spawning in its own process group with piped stdin, stdout and stderr; feeding
-stdin; reading output as chunks or lines; reaping; stopping. Knows nothing of
-calls or turns: an owner supplies callbacks.
+`src/proc.c`. Every child process, the prompt program, providers and `exec`
+programs alike: spawning in its own process group with piped stdin, stdout and
+stderr; feeding stdin; reading output as chunks or lines; reaping; stopping.
+Knows nothing of calls or turns: an owner supplies callbacks. The prompt
+program alone runs to completion before the loop starts, outside the worker
+table.
 
 **State:** `procs`, the worker table. Per worker: pid, stdin pipe and the
 bytes still to write, output pipes and partial lines, exit status, kill stage
@@ -324,6 +326,7 @@ no output is lost to an early `SIGCHLD`.
 | Function | Contract | Caller |
 |---|---|---|
 | `proc_spawn(ps, req)` | forks `req.path` (no arguments) or `req.argv` (`execvp`) in a new process group, signals reset, every other descriptor closed on exec, `SIGTERM` on parent death on Linux. stdin gets `stdin_bytes`, then closes unless `keep_stdin_open`. A failed `exec` writes the reason to stderr and exits 127 | driver, calls |
+| `proc_run(path, out)` | blocking: runs `path` as `proc_spawn` does, with stdin at EOF, stdout appended to `out` until EOF and stderr the kernel's own; returns its wait status. Only before the loop starts | driver |
 | `proc_write_stdin(w, bytes, close)` | queues bytes; `close` closes the pipe once they are written. `false` if stdin is already closed | calls |
 | `proc_term(w)` | once: `SIGTERM` to the group, `SIGKILL` after `--kill-grace` | driver, calls |
 | `proc_term_all(ps)` | `proc_term` for every worker | `shutdown_kernel` |
@@ -333,7 +336,7 @@ no output is lost to an early `SIGCHLD`.
 | `proc_next_kill_at(ps)`, `proc_escalate_kills(ps, now)` | the next deadline; at it, `SIGKILL`, and 1 s later the pipes are abandoned, so a descendant holding them cannot keep a worker alive | loop |
 | `proc_count(ps)` | workers not yet done | loop |
 | `proc_succeeded(w)` | exited 0 and never signalled by the kernel | calls |
-| `proc_describe_exit(w, text)` | `exit N` or `signal N` | calls |
+| `proc_describe_status(wait_status, text)` | `exit N` or `signal N` | calls, driver |
 
 | Rule | |
 |---|---|

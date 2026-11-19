@@ -1,5 +1,6 @@
 #include "driver.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,14 +92,16 @@ static void end_turn(driver *d)
     event(d->sink, "{'type':'turn_end','run':%d,'turn':%d,'usage':%R}", d->run, d->turn, provider_usage(d));
 }
 
-static char *read_file(const char *path)
+static bool read_file(const char *path, buf *text)
 {
-    buf text = { 0 };
     char chunk[8192];
-    int fd = path ? open(path, O_RDONLY | O_CLOEXEC) : -1;
-    for (ssize_t n; fd >= 0 && (n = read(fd, chunk, sizeof chunk)) > 0;) buf_put(&text, chunk, (size_t)n);
+    ssize_t n = 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    while (fd >= 0 && (n = read(fd, chunk, sizeof chunk)) > 0) buf_put(text, chunk, (size_t)n);
+    int error = errno;
     if (fd >= 0) close(fd);
-    return fd >= 0 ? buf_cstr(&text) : NULL;
+    errno = error;
+    return fd >= 0 && n == 0;
 }
 
 static const char *model_id(const driver *d)
@@ -107,30 +110,50 @@ static const char *model_id(const driver *d)
     return slash ? slash + 1 : "";
 }
 
-static char *provider_path(const driver *d)
+static char *home_program(const driver *d, span name)
 {
-    span provider = { d->provider_model, strcspn(d->provider_model, "/") };
-    if (!provider.n || provider.p[0] == '.') return NULL;
     static const char *const layers[] = { "", "/system" };    /* the user's overlay, then what make install owns */
-    for (size_t i = 0; i < sizeof layers / sizeof *layers; i++) {
+    for (size_t i = 0; i < LEN(layers); i++) {
         buf path = { 0 };
-        buf_printf(&path, "%s%s/providers/%.*s", d->config->home_dir, layers[i], (int)provider.n, provider.p);
+        buf_printf(&path, "%s%s/%.*s", d->config->home_dir, layers[i], (int)name.n, name.p);
         if (access(path.p, X_OK) == 0) return path.p;
         buf_free(&path);
     }
     return NULL;
 }
 
+static char *provider_path(const driver *d)
+{
+    span provider = { d->provider_model, strcspn(d->provider_model, "/") };
+    if (!provider.n || provider.p[0] == '.') return NULL;
+    buf name = { 0 };
+    buf_printf(&name, "providers/%.*s", (int)provider.n, provider.p);
+    char *path = home_program(d, buf_span(&name));
+    buf_free(&name);
+    return path;
+}
+
+static void run_prompt_program(driver *d)
+{
+    char *path = home_program(d, S("prompt"));
+    if (!path) return;
+    int wait_status = proc_run(path, &d->system);
+    if (wait_status) {
+        buf why = { 0 };
+        proc_describe_status(wait_status, &why);
+        die("%s: %s", path, buf_cstr(&why));
+    }
+    free(path);
+}
+
 static void build_request(driver *d, json_buf *request)
 {
     json_buf messages = { 0 };
-    char *system = read_file(d->system_path);
     strv_free(&d->context_ids);
     session_context(d->session, &messages, &d->context_ids);
-    json_printf(request, "{'model':%s,'system':%s,'messages':%R,'tools':%R,'params':{%r}}",
-                model_id(d), system, buf_span(&messages), calls_tool_schemas(d->calls),
-                buf_cstr(&d->param_members));
-    free(system);
+    json_printf(request, "{'model':%s,'system':%S,'messages':%R,'tools':%R,'params':{%r}}",
+                model_id(d), d->system.n ? buf_span(&d->system) : NOSPAN, buf_span(&messages),
+                calls_tool_schemas(d->calls), buf_cstr(&d->param_members));
     buf_free(&messages);
 }
 
@@ -382,20 +405,28 @@ static void use_model(driver *d, char *provider_model)
 
 void driver_open(driver *d)
 {
+    const char *system_path = d->config->system_path;
     use_model(d, xstrdup(d->config->provider_model));
-    d->system_path = xstrdup(d->config->system_path);
     buf_set(&d->param_members, buf_span(&d->config->param_members));
+    if (!system_path) run_prompt_program(d);
+    else if (!read_file(system_path, &d->system)) die("%s: %s", system_path, strerror(errno));
 }
 
-void driver_set(driver *d, json model, json system_path, json params)
+bool driver_set(driver *d, json model, json system_path, json params)
 {
-    char *text;
+    char *path = json_text_dup(system_path), *text;
+    buf system = { 0 };
+    bool readable = !path || read_file(path, &system);
+    if (path && readable) buf_free(&d->system), d->system = system;
+    else buf_free(&system);
+    free(path);
+    if (!readable) return false;
     if ((text = json_text_dup(model))) use_model(d, text);
-    if ((text = json_text_dup(system_path))) free(d->system_path), d->system_path = text;
     if (json_is(params, '{')) {
         json object = json_trim(params);
         buf_set(&d->param_members, json_trim((span){ object.p + 1, object.n - 2 }));
     }
+    return true;
 }
 
 bool driver_append(driver *d, const char *type, const char *parent_id, const json_list *members, json ref)

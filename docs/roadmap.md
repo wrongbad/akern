@@ -16,7 +16,6 @@ line and renders events through `render.jq`.
 |---|---|
 | sessions | a path per directory, `~/.akern/sessions/<cwd>/<time>-<id>.jsonl`; `--continue` and `--resume` pass `-s` |
 | settings | [where settings live](#where-settings-live); the default model is done (`$AKERN_HOME/model`, `akern-model`) |
-| context files | `AGENTS.md` / `CLAUDE.md` found from the working directory, merged into the `-S` file |
 | prompt input | `/name` expands `prompts/<name>.md`; `@file` becomes content blocks; `!cmd` sends a command's output, `!!cmd` only shows it |
 | slash commands | `/cmd args` runs `akern-cmd SESSION args` and shows its stdout ([tools.md §2](tools.md#2-programs-on-path)) |
 | interrupt key | sends the line typed with `when: now` |
@@ -115,10 +114,11 @@ limits), and whether each gets a one-value file like `model` or they share a
 `~/.akern/config`. *Leaning:* the `akern-cli` front end, with `key=value` lines that
 a shell reads without a parser, so front ends in any language share it.
 
-Project-local skills and system prompts (`./.akern/`, honored only in trusted
-directories) are not read: the kernel reads `AKERN_HOME` alone. Smallest
-version: the front end passes `-S` a merged system prompt when the project is
-trusted. Decide when a real project needs it.
+Project-local skills and prompts (`./.akern/`, honored only in trusted
+directories) are not read by the shipped `prompt`, which never runs anything
+from the project; the kernel reads `AKERN_HOME` alone. A user's own
+`$AKERN_HOME/prompt` can choose to honor them, deciding itself which
+directories it trusts. Decide when a real project needs it.
 
 ### Jobs after a kernel restart
 

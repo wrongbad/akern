@@ -81,8 +81,9 @@ static void cmd_kill(ctl *c, json command, json ref)
 
 static void cmd_set(ctl *c, json command, json ref)
 {
-    driver_set(c->driver, json_get(command, "model"), json_get(command, "system"), json_get(command, "params"));
-    reply_ok(c, ref);
+    if (driver_set(c->driver, json_get(command, "model"), json_get(command, "system"), json_get(command, "params")))
+        reply_ok(c, ref);
+    else reply_error(c, ref, "system file cannot be read");
 }
 
 static void put_entry_members(json entry, json_list *members)

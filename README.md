@@ -1,61 +1,54 @@
 # akern
 
-An agent kernel: a minimal agent harness in C99. The kernel runs the
-model/tool loop, concurrently, and brokers the model's reads, writes and
-executions to the OS the way a Unix kernel or a GPU driver moves bytes: as
-opaque data it schedules and delivers but never interprets. Everything
-else — the model provider, every tool, every policy, every UI — is a separate
-program that speaks JSON lines over a pipe.
-
-The target is feature parity with the [pi](https://github.com/earendil-works/pi)
-coding harness, reached by composition instead of by a plugin API: if you can
-write an executable in any language, you can extend it. No threads, no
-libraries: parallel tool calls, background jobs, steering that can interrupt a
-turn, and sub-agents all come from processes and one `poll(2)` loop.
+An agent kernel: a truly minimal agent harness in C99. 
 
 ## Quick start
 
 ```sh
-make install                        # programs to /usr/local/bin, providers and skills to ~/.akern/system
-                                    # elsewhere: make install PREFIX=$HOME/.local HOME_DIR=$HOME/.akern
-akern-cli                           # the first time, asks for a model and saves it in ~/.akern/model
+# install default env vars: PREFIX=/usr/local AKERN_HOME=~/.akern
+make install                        
 akern-cli "what does this repo do?"
 ```
 
-`akern-model` picks the default model again, or sets it with
-`akern-model provider/model`; `AKERN_MODEL=provider/model` overrides it for one
-run.
+Inspired by Unix: write programs that do one thing and do it well. And following the popular conventions in unix programs, we design this system as a collections of executables using stdio pipes to plug and play with existing tools like jq, and user extensions written in any language. "Executable" here includes scripts and anything that can be launched from the command line.
+
+The kernel `akern` runs the core agent event loop, and delegates out to external executables for model requests, system prompt building, and the user facing CLI is offloaded to a wrapper script. This makes behaviors extremely easy to customize and extend. The communication protocols are text or jsonl over stdin/stdout pipes, enabling plugins to be written as simple bash and jq scripts.
+
+Why C99? It's a sort of fun aesthetic / nostalgic choice. For a tiny project like this, basically any language can be sufficiently fast and safe without any trouble. So I picked one that hasn't been ruined for me in the age of +15,487 lines LGTM pull requests. 
+
+The goal is feature parity with the [pi](https://github.com/earendil-works/pi) coding harness, reached by composition of trivial user-replacable scripts and binaries.
+
+In some ways we already exceed base pi capabilities. Concurrent tool calls and recursive sub-agent calls come for free with the subprocess design.
 
 ## Developing
 
 ```sh
-make            # everything under build/, laid out like an installed ~/.akern
-make test       # scenario tests against the mock provider
-./akern-dev.sh  # akern-cli against build/: AKERN_HOME=build, build/bin first on PATH
+make            # install to ./build/
+make test       # run tests
+./akern-dev.sh  # run akern-cli with AKERN_HOME=./build
 ```
 
 | Target | Does |
 |---|---|
-| `make` | `build/bin/` (`akern`, `akern-edit`, `akern-cli`, `akern-model`) and `build/system/` (`providers/`, `skills/`, `render.jq`, `system.md`, `README.md`), the layer `make install` copies to `~/.akern/system`. `build/` itself is the user layer: nothing in it is generated, so `build/model`, `build/providers/`, `build/render.jq` and `build/system.md` are yours |
-| `make test` | pytest in `build/venv` over `tests/`. After every test, `tests/invariants.py` checks each session and event log: every `tool_use` answered in the next message in call order, every `tool_pending` closed by one `job_result`, no `tool_use` in an aborted message, one provider stream at a time, every `tool_start` ended, `run_end.error` set exactly when the reason is `error`. `tests/bin/gate PATH` blocks until the test creates PATH, so a test decides when each call finishes |
-| `make asan` | the same tests against `build/asan/`, built with AddressSanitizer and UBSan; fails on any report (`build/asan/sanitizer.*`). The two trees share no objects, so switching needs no `make clean` |
+| `make` | builds into `build/`, laid out like an installed `~/.akern` |
+| `make test` | pytest in `build/venv` over `tests/`. |
+| `make asan` | the same tests against `build/asan/`, built with AddressSanitizer and UBSan. |
 | `make lines` | counts the kernel's lines |
 | `make install` | [tools.md §3](docs/tools.md#install) |
 | `make clean` | removes `build/` |
 
-Not yet built: a richer line mode, the session commands (`fork`, `tree`,
-`compact`, `sessions`), `akern-pkg`.
+Not yet built: `akern-tui`, the session commands (`fork`, `tree`,
+`compact`, `sessions`).
 
 ## Installing
 
-`make install` copies the programs to `$(PREFIX)/bin` and replaces
-`$(HOME_DIR)/system` whole with `build/system/`, so nothing dropped from a
-release lingers. Never edit `system/`: put your own provider, `render.jq` or
-`system.md` in `$(HOME_DIR)` itself, where it is preferred and never
-overwritten; the install notes each one that shadows a built-in. A copy left by
-an install from before `system/` that is byte-identical to the new built-in is
-removed, since it changes nothing. `~/.akern/system/README.md` describes the
-layout.
+`make install` copies the programs to `PREFIX/bin` and replaces
+`AKERN_HOME/system` whole with `build/system/`, so nothing dropped from a
+release lingers. Never edit `system/`: put your own `providers/`, `skills/`,
+`render.jq` or `prompt` in `AKERN_HOME` itself, where they are looked up first
+and never overwritten. A `system.md` there is added to the top of the system
+prompt. `make uninstall` removes the programs and `system/`, and leaves your
+files. `~/.akern/system/README.md` describes the layout.
 
 See [tools.md §3](docs/tools.md#install) for details.
 
@@ -66,7 +59,7 @@ See [tools.md §3](docs/tools.md#install) for details.
 | [docs/design.md](docs/design.md) | goals, principles, costs and security posture |
 | [docs/akern.md](docs/akern.md) | the kernel process: environment, arguments, stdin commands, stdout events, session files |
 | [docs/kernel.md](docs/kernel.md) | `src/`: each module's state and API, delivery modes, jobs, the dependency graph |
-| [docs/providers.md](docs/providers.md) | `providers/`: the request, the event stream, errors, the message schema; anthropic, claude-code, mock |
+| [docs/providers.md](docs/providers.md) | `providers/`: the request, the event stream, errors, the message schema; anthropic, claude-code, openai, mock |
 | [docs/tools.md](docs/tools.md) | `tools/` and `skills/`: `exec`, `read`, `write`, programs on `PATH`, skills, the `akern-cli` front end |
 | [docs/pi-parity.md](docs/pi-parity.md) | every pi feature mapped to the mechanism that provides it here |
 | [docs/roadmap.md](docs/roadmap.md) | remaining work and open questions |
