@@ -114,7 +114,9 @@ and messages that interrupt a turn are part of the kernel from the start.
 17. **Providers keep no model tables.** A provider sends the model id as
     given and compiles in no list of models, limits or features: `--models`
     asks the API, and what a model refuses comes back as the API's error. A
-    table goes stale with every release.
+    table goes stale with every release. Where the backend has no list API,
+    its stable aliases (which track the latest model) are the list:
+    `claude-code` lists `claude`'s aliases.
 
 ## Seams
 

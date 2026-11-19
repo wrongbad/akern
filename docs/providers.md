@@ -15,7 +15,7 @@ fields ignored, `x-` names): [akern-loop.md](akern-loop.md#conventions).
 | stdin | the request (§2), then EOF |
 | stdout | events and one terminal line (§3); each valid line other than `result` is forwarded to the kernel's stdout as written |
 | stderr | each line becomes a `notice` event with `source: provider` |
-| `--models` | run by hand or by front ends, not by the kernel: one line per model, `{"id":"…","context":1000000,"max_output":128000}`; `context` and `max_output` are left out when unknown |
+| `--models` | run by hand or by front ends, not by the kernel: one line per model, `{"id":"…","context":1000000,"max_output":128000}`; `context` and `max_output` are left out when unknown. A provider that cannot be used (no key, no binary) prints an `error` line (§4) instead and exits non-zero, so exit 0 means ready |
 
 Providers are kept off `PATH` on purpose ([design.md](design.md#programs-and-home)).
 A provider is a filter, so providers compose: a wrapper can change the request
@@ -264,7 +264,7 @@ binary only and never touches Claude Code's credentials.
 
 | Input | Use |
 |---|---|
-| model | `-m claude-code/<x>` passes `<x>` to `--model` as is. `--models` prints nothing |
+| model | `-m claude-code/<x>` passes `<x>` to `--model` as is. `--models` lists `fable`, `sonnet`, `opus` and `haiku`, the aliases `claude` documents for the latest model of each family (its `--help` and the Claude Code model configuration docs), without limits: `claude` has no command that lists models. Without `claude` on `PATH`, an `other` error `claude is not on PATH` |
 | `system` | `--system-prompt` (`""` when `null`) |
 | `params.effort` | `--effort` |
 | `params.max_tokens` | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` |

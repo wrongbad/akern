@@ -90,6 +90,8 @@ mechanisms, because they are what tests whether the architecture holds.
 | Other providers, custom providers | User | one executable each |
 | `--model`, `--thinking` | Kernel | `-m provider/model`, `-P effort=high` |
 | `/model` switch mid-session | Kernel | `set` command; takes effect at the next request |
+| Default model setting | User (bundled) | `$AKERN_HOME/model`, one `provider/model` line; `akern` exports it as `AKERN_MODEL` when that is unset |
+| Interactive model selector | User (bundled) | `akern-model`: every provider, numbered, with why an unavailable one cannot be used; then the ready one's `--models` ids or a typed id. `akern` runs it when no model is set |
 | Model cycling, scoped models, fuzzy match | User | `akern` or frontend feature over `<provider> --models` |
 | `--list-models` | User | `akern-models` runs each provider with `--models` |
 | `auth login` / `logout` / OAuth subscriptions | User | `akern-login-<provider>`, owned by the provider package |

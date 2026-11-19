@@ -1,0 +1,81 @@
+#!/bin/sh
+usage='usage: akern-model [provider/model] — save the default model, or choose it on the terminal from what the providers list'
+home="${AKERN_HOME:-$HOME/.akern}"
+
+save() {
+    mkdir -p "$home" && printf '%s\n' "$1" >"$home/model" && printf '%s\n' "$1"
+}
+
+case $#:$1 in
+1:--help) echo "$usage"; exit 0 ;;
+1:?*/?*) save "$1"; exit ;;
+0:) ;;
+*) echo "$usage" >&2; exit 2 ;;
+esac
+
+if ! (: </dev/tty) 2>/dev/null; then
+    [ -s "$home/model" ] && problem='no terminal' || problem='no model set'
+    echo "akern-model: $problem" >&2
+    exit 1
+fi
+exec 3</dev/tty 4>/dev/tty
+
+listing() {
+    "$1" --models </dev/null 2>/dev/null &
+    pid=$!
+    (i=0; while [ $i -lt 100 ] && kill -0 $pid; do sleep 0.1; i=$((i + 1)); done; kill $pid) >/dev/null 2>&1 &
+    wait $pid
+}
+
+number() {
+    awk '{ printf "%3d) %s\n", NR, $0 }' >&4
+}
+
+choose() {
+    list=$(cat)
+    count=$(printf '%s\n' "$list" | awk 'END { print NR }')
+    printf '%s\n' "$list" | number
+    while printf '%s [1-%d]: ' "$1" "$count" >&4 && read -r n <&3; do
+        case $n in
+        '' | *[!0-9]*) ;;
+        *) [ "$n" -ge 1 ] && [ "$n" -le "$count" ] && echo "$n" && return ;;
+        esac
+    done
+    echo >&4
+    return 1
+}
+
+records=$(for p in "$home"/providers/*; do
+    [ -f "$p" ] && [ -x "$p" ] || continue
+    out=$(listing "$p") && ready=true || ready=false
+    printf '%s\n' "$out" | jq -cnR --arg name "${p##*/}" --argjson ready $ready '[inputs | fromjson? | objects]
+        | {$name, $ready, ids: map(.id // empty), reason: (map(select(.type == "error") | .message) | first)}'
+done)
+[ -n "$records" ] || { echo "akern-model: no provider in $home/providers" >&2; exit 1; }
+labels=$(printf '%s\n' "$records" | jq -r '.name + if .ready then ""
+    else "  \u001b[2m(" + (["unavailable", .reason // empty] | join(": ")) + ")\u001b[0m" end')
+if ! printf '%s\n' "$records" | grep -q '"ready":true'; then
+    printf '%s\n' "$labels" | number
+    echo 'akern-model: no provider is ready' >&2
+    exit 1
+fi
+
+while n=$(printf '%s\n' "$labels" | choose Provider) || exit 1
+    record=$(printf '%s\n' "$records" | sed -n "${n}p")
+    refusal=$(printf '%s\n' "$record" | jq -r 'select(.ready | not) | [.name + " is unavailable", .reason // empty] | join(": ")')
+    [ -n "$refusal" ]
+do
+    printf '%s\n' "$refusal" >&4
+done
+provider=$(printf '%s\n' "$record" | jq -r .name)
+list=$(printf '%s\n' "$record" | jq -r '.ids[]')
+model=
+if [ -n "$list" ]; then
+    n=$(printf '%s\n%s\n' "$list" '(type a model id)' | choose Model) || exit 1
+    model=$(printf '%s\n' "$list" | sed -n "${n}p")
+fi
+while [ -z "$model" ]; do
+    printf 'Model id: ' >&4
+    read -r model <&3 || { echo >&4; exit 1; }
+done
+save "$provider/$model"

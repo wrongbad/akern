@@ -15,7 +15,7 @@ line and renders events through `render.jq`.
 | Item | Scope |
 |---|---|
 | sessions | a path per directory, `~/.akern/sessions/<cwd>/<time>-<id>.jsonl`; `--continue` and `--resume` pass `-s` |
-| settings | [where settings live](#where-settings-live) |
+| settings | [where settings live](#where-settings-live); the default model is done (`$AKERN_HOME/model`, `akern-model`) |
 | context files | `AGENTS.md` / `CLAUDE.md` found from the working directory, merged into the `-S` file |
 | prompt input | `/name` expands `prompts/<name>.md`; `@file` becomes content blocks; `!cmd` sends a command's output, `!!cmd` only shows it |
 | slash commands | `/cmd args` runs `akern-cmd SESSION args` and shows its stdout ([tools.md §2](tools.md#2-programs-on-path)) |
@@ -107,9 +107,13 @@ a second UI) get a way in.
 
 ### Where settings live
 
-The kernel reads flags and environment only. Something turns `~/.akern/config`
-into them. *Leaning:* the `akern` front end, with `key=value` lines that a
-shell reads without a parser, so front ends in any language share it.
+The kernel reads flags and environment only. The default model already has a
+home: `$AKERN_HOME/model`, one line, written by `akern-model` and turned into
+`AKERN_MODEL` by the `akern` front end ([tools.md §4](tools.md#4-the-akern-front-end)).
+Still open: the other settings (`-P` params such as effort, the system prompt,
+limits), and whether each gets a one-value file like `model` or they share a
+`~/.akern/config`. *Leaning:* the `akern` front end, with `key=value` lines that
+a shell reads without a parser, so front ends in any language share it.
 
 Project-local skills and system prompts (`./.akern/`, honored only in trusted
 directories) are not read: the kernel reads `AKERN_HOME` alone. Smallest

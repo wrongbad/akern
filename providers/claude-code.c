@@ -22,6 +22,8 @@ static const char *const CLAUDE_ARGS[] = {
     "--setting-sources", "", "--disable-slash-commands", "--permission-mode", "dontAsk", "--max-turns", "1",
 };
 
+static const char *const CLAUDE_ALIASES[] = { "fable", "sonnet", "opus", "haiku" };
+
 static const char *const CLAUDE_ENV[][2] = {
     { "CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1" },
     { "CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1" },
@@ -75,6 +77,18 @@ static char *self_path(const char *argv0)
 {
     char resolved[PATH_MAX];
     return xstrdup(realpath(argv0, resolved) ? resolved : argv0);
+}
+
+static bool on_path(const char *name)
+{
+    char file[PATH_MAX];
+    for (const char *dir = getenv("PATH"); dir;) {
+        int n = (int)strcspn(dir, ":");
+        snprintf(file, sizeof file, "%.*s/%s", n ? n : 1, n ? dir : ".", name);
+        if (access(file, X_OK) == 0) return true;
+        dir = dir[n] ? dir + n + 1 : NULL;
+    }
+    return false;
 }
 
 static void build_invocation(json request, const char *argv0, strv *args, buf *input)
@@ -293,7 +307,11 @@ static int serve_tools(const char *tools)
 
 int main(int argc, char **argv)
 {
-    if (argc > 1 && !strcmp(argv[1], "--models")) return 0;
+    if (argc > 1 && !strcmp(argv[1], "--models")) {
+        if (!on_path(CLAUDE_ARGS[0])) provider_error("other", "claude is not on PATH", 0);
+        for (size_t i = 0; i < LEN(CLAUDE_ALIASES); i++) provider_model(CLAUDE_ALIASES[i], 0, 0);
+        return 0;
+    }
     if (argc > 2 && !strcmp(argv[1], "--mcp")) return serve_tools(argv[2]);
     signal(SIGPIPE, SIG_IGN);
     json request = provider_request();

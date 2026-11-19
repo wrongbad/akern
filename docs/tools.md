@@ -223,13 +223,15 @@ description: Background jobs, interactive programs and sub-agents — …
 
 | `make` | `make install` (`PREFIX=/usr/local`, `HOME_DIR=~/.akern`) |
 |---|---|
-| `build/bin/`: `akern-loop`, `akern-edit`, `akern` | the same programs into `$PREFIX/bin` |
+| `build/bin/`: `akern-loop`, `akern-edit`, `akern`, `akern-model` | the same programs into `$PREFIX/bin` |
 | `build/providers/` | into `$HOME_DIR/providers`, replacing older copies |
 | `build/skills/`, `build/render.jq` | into `$HOME_DIR`, each only if missing |
 | `build/system.md`, listing `build/skills` | `$HOME_DIR/system.md`, only if missing, listing every skill in `$HOME_DIR/skills` |
 
 An edited `render.jq` or `system.md` survives `make install`; a skill of your
-own needs its line added to `system.md` by hand.
+own needs its line added to `system.md` by hand. Neither `make` nor
+`make install` writes `model` ([§4](#4-the-akern-front-end)); `make clean`
+removes `build/`, and with it `build/model`.
 
 ## 4. The akern front end
 
@@ -244,6 +246,13 @@ with stdin still the terminal: every line typed is sent, steering the agent
 when it is working, and Ctrl-D ends. The shell and `jq` ignore `SIGINT`, so
 Ctrl-C reaches only `akern-loop` ([akern-loop.md §2](akern-loop.md#exit)).
 Scripts that want one answer use `akern-loop -p "…"`.
+
+The model, exported as `AKERN_MODEL`, is the first that is set:
+
+1. `AKERN_MODEL`;
+2. the first line of `$AKERN_HOME/model`;
+3. what `akern-model` prints, after asking on the terminal. Its failure ends
+   `akern`.
 
 `tools/render.jq` is the display, as data: edit it to change what is shown.
 
@@ -267,3 +276,50 @@ Whenever it changes, a dim status line follows, on a line of its own:
 | `… working` | between `run_start` and `run_end`; from the start when a prompt was given |
 | `⏵ N jobs running · waiting for input` | otherwise, while some `tool_pending` has no `job_result` yet |
 | `› waiting for input` | otherwise |
+
+### akern-model
+
+`tools/akern-model`, `sh` and `jq`. Sets the default model, the file `akern`
+reads.
+
+```
+akern-model [provider/model]
+```
+
+| Call | Does |
+|---|---|
+| `akern-model PROVIDER/MODEL` | writes it to `$AKERN_HOME/model` as one line and prints it; no terminal needed |
+| `akern-model` | asks on `/dev/tty`, even when a default exists; saves and prints the choice as above |
+| `akern-model --help` | the usage line |
+
+Asking runs every executable in `$AKERN_HOME/providers` with `--models`
+([providers.md §1](providers.md#1-finding-and-running-a-provider)), one at a time, each killed after
+10 s, and lists them all alphabetically, numbered. One that exits 0 is ready;
+one that fails is marked, dim, `(unavailable: MESSAGE)`, the `message` of its
+`error` line (`(unavailable)` without one). There is no table of which
+variable or binary a provider needs: its error says. Choosing an unavailable
+provider prints `NAME is unavailable: MESSAGE` and shows the list again. A
+ready provider's ids are listed, numbered, with a last entry
+`(type a model id)`; one that lists none is asked for an id directly. Prompts
+and lists go to `/dev/tty`, so `akern-model`'s stdout can be captured.
+
+```
+  1) anthropic  (unavailable: ANTHROPIC_API_KEY is not set)
+  2) claude-code
+  3) mock
+  4) openai  (unavailable: OPENAI_API_KEY is not set)
+Provider [1-4]: 2
+  1) fable
+  2) sonnet
+  3) opus
+  4) haiku
+  5) (type a model id)
+Model [1-5]: 3
+claude-code/opus
+```
+
+| Exit | Output |
+|---|---|
+| 0 | the saved `provider/model` on stdout |
+| 1 | no terminal: on stderr, `akern-model: no model set`, or `akern-model: no terminal` when `$AKERN_HOME/model` exists. No provider: `akern-model: no provider in DIR`. None ready: the list, then `akern-model: no provider is ready`. Ctrl-D at a prompt: nothing saved |
+| 2 | other arguments: the usage line on stderr |

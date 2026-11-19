@@ -26,7 +26,7 @@ session file.
 | Variable | Default | Meaning |
 |---|---|---|
 | `AKERN_HOME` | `$HOME/.akern` (`./.akern` without `HOME`) | holds `providers/<name>` and `system.md` |
-| `AKERN_MODEL` | none | `provider/model` when `-m` is absent. Neither given: exit 2 |
+| `AKERN_MODEL` | none | `provider/model` when `-m` is absent. Neither given: exit 2. The kernel never reads `$AKERN_HOME/model`; the `akern` front end turns it into this variable ([tools.md §4](tools.md#4-the-akern-front-end)) |
 | `AKERN_RECURSION_LIMIT` | `4` | kernels that may still nest, this one included. `0`, negative or non-numeric: exit 2 |
 | `TMPDIR` | `/tmp` | directory of the anonymous session |
 

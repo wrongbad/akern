@@ -127,3 +127,19 @@ def test_claude_runs_without_the_host_sessions_claude_variables(claude):
     assert claude_vars == {"CLAUDE_CONFIG_DIR": "/cfg", "CLAUDE_CODE_OAUTH_TOKEN": "t", "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
                            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1"}
     assert seen["env"]["HOME"] == os.environ["HOME"]
+
+
+def test_models_lists_the_aliases_claude_documents_without_running_it(tmp_path):
+    log = tmp_path / "log.json"
+    done = subprocess.run([PROVIDER, "--models"], env={"PATH": f"{REPO / 'tests' / 'bin'}:/usr/bin:/bin",
+                          "FAKE_CLAUDE_LOG": str(log)}, capture_output=True, text=True, timeout=10)
+    assert (done.returncode, done.stderr) == (0, "")
+    assert [json.loads(line) for line in done.stdout.splitlines()] == [
+        {"id": "fable"}, {"id": "sonnet"}, {"id": "opus"}, {"id": "haiku"}]
+    assert not log.exists()
+
+
+def test_models_without_claude_on_path_is_an_error(tmp_path):
+    done = subprocess.run([PROVIDER, "--models"], env={"PATH": str(tmp_path)}, capture_output=True, text=True, timeout=10)
+    assert done.returncode == 1
+    assert json.loads(done.stdout) == {"type": "error", "kind": "other", "message": "claude is not on PATH", "status": 0}
