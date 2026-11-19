@@ -2,12 +2,13 @@
 
 #include <stdlib.h>
 
-#include "ctl.h"
 #include "msg.h"
+#include "sink.h"
 
 typedef struct item {
     enum source source;
     enum when   when;
+    size_t      seq;
     json_buf    content;
 } item;
 
@@ -49,18 +50,23 @@ void inbox_add(inbox *in, enum source source, enum when when, json content)
     item *it = xcalloc(1, sizeof *it);
     it->source = source;
     it->when = when;
+    it->seq = in->nadded++;
     buf_set(&it->content, content);
     VEC_PUSH(in->items, in->nitems, in->capitems, it);
-    event(in->events, "{'type':'queued','source':%s,'when':%s,'n':%d}", source_name(source), when_name(when),
+    event(in->sink, "{'type':'queued','source':%s,'when':%s,'n':%d}", source_name(source), when_name(when),
           (int)in->nitems);
 }
 
-bool inbox_due(const inbox *in, unsigned when_mask, size_t first_item)
+static bool due_from(const inbox *in, unsigned when_mask, size_t first_seq)
 {
-    for (size_t i = first_item; i < in->nitems; i++)
-        if (in->items[i]->when & when_mask) return true;
+    for (size_t i = 0; i < in->nitems; i++)
+        if (in->items[i]->seq >= first_seq && (in->items[i]->when & when_mask)) return true;
     return false;
 }
+
+bool inbox_due(const inbox *in, unsigned when_mask)            { return due_from(in, when_mask, 0); }
+bool inbox_due_since_mark(const inbox *in, unsigned when_mask) { return due_from(in, when_mask, in->mark); }
+void inbox_mark(inbox *in)                                     { in->mark = in->nadded; }
 
 static bool take_one(inbox *in, unsigned when_mask, bool prompts_only, void (*put)(json_list *, json), json_list *out)
 {

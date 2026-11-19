@@ -1,5 +1,6 @@
 /* loop: the one poll loop all I/O waits in, signals, giving the driver, calls and proc their
-   chance to move until nothing does, and when the kernel exits. Holds no conversation state.
+   chance to move until nothing does, and when the kernel exits, including when the session
+   can no longer be appended to. Holds no conversation state.
    Modules that wait on a descriptor add it to the poll set the loop lends them each round. */
 
 #ifndef LOOP_H
@@ -24,10 +25,12 @@ typedef struct loop {
     int             exit_code;
     double          last_sigint_at;
     const config   *config;
-    struct driver  *driver;
-    struct procs   *procs;
-    struct calls   *calls;
+    struct sink    *sink;
     struct ctl     *ctl;
+    struct driver  *driver;
+    struct calls   *calls;
+    struct procs   *procs;
+    struct session *session;
 } loop;
 
 void watch_once(poll_set *set, int fd, short events, ready_fn fn, void *ctx);

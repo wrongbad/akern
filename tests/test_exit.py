@@ -1,4 +1,7 @@
+import contextlib
 import os
+import pty
+import select
 import signal
 import subprocess
 
@@ -29,12 +32,55 @@ def test_shutdown_closes_a_job_with_its_usual_result_not_its_raw_stdout(kernel, 
     assert result == {"stdout": f"({len(TINY_PNG)} bytes not shown: the program failed)", "stderr": "ready\n", "exit": 0}
 
 
-def test_sigint_aborts_keeping_jobs_and_a_second_within_1s_shuts_down(kernel):
+def test_sigint_aborts_keeping_jobs_and_a_second_within_3s_shuts_down(kernel):
     run = kernel(parallel(tool("exec", argv=["sleeper", "30"], wait=False), shell("sleeper 30")),
                  during=signal_when((seen("tool_progress", 2), signal.SIGINT), (seen("run_end"), signal.SIGINT)), code=130)
     assert run.result_texts == ["Killed: the run was aborted."]
     assert len(run.pending) == len(run.job_reports) == 1
     assert [e["reason"] for e in run.events_of("run_end")] == ["aborted"]
+    types = [e["type"] for e in run.events]
+    assert run.events_of("interrupt") == [{"type": "interrupt", "quit_within": 3}]
+    assert types.index("interrupt") < types.index("run_end")
+
+
+def test_ctrl_c_in_the_front_end_aborts_and_hints_and_a_second_quits(tmp_path, akern_env):
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe("akern", ["akern"], {**akern_env, "AKERN_MODEL": "mock/echo", "TMPDIR": str(tmp_path)})
+    screen = bytearray()
+
+    def read():
+        assert select.select([fd], [], [], 5)[0], f"terminal idle: {screen.decode(errors='replace')!r}"
+        with contextlib.suppress(OSError):
+            chunk = os.read(fd, 4096)
+            screen.extend(chunk)
+            return chunk
+        return b""
+
+    def until(text):
+        while text not in screen.decode(errors="replace"):
+            assert read(), f"terminal closed before {text!r}: {screen.decode(errors='replace')!r}"
+
+    try:
+        until("waiting for input")
+        os.write(fd, b"!sleeper 30\r")
+        until("▸ exec")
+        os.write(fd, b"\x03")
+        until("press Ctrl-C again within 3s to quit")
+        until("aborted]")
+        os.write(fd, b"hello\r")
+        until("echo: hello")
+        os.write(fd, b"\x03")
+        while read():
+            pass
+        os.waitpid(pid, 0)
+        pid = None
+    finally:
+        os.close(fd)
+        if pid:
+            with contextlib.suppress(OSError):
+                os.killpg(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
 
 
 def test_print_mode_writes_only_the_final_answer(kernel):

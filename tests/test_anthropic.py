@@ -11,13 +11,18 @@ import pytest
 
 PROVIDER = Path(__file__).resolve().parent.parent / "build" / "providers" / "anthropic"
 
-STREAM = "".join(f"data: {json.dumps(event)}\n\n" for event in [
+
+def sse(*events):
+    return "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
+
+
+STREAM = sse(
     {"type": "message_start", "message": {"usage": {"input_tokens": 1}}},
     {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
     {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
     {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
     {"type": "message_stop"},
-]).encode()
+)
 
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg=="
 IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": PNG}}
@@ -25,16 +30,16 @@ IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png"
 
 @pytest.fixture(scope="module")
 def api():
-    bodies = []
+    bodies, streams = [], [STREAM]
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             bodies.append(self.rfile.read(int(self.headers["content-length"])))
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
-            self.send_header("content-length", str(len(STREAM)))
+            self.send_header("content-length", str(len(streams[-1])))
             self.end_headers()
-            self.wfile.write(STREAM)
+            self.wfile.write(streams[-1])
 
         def log_message(self, *args):
             pass
@@ -44,19 +49,21 @@ def api():
     env = {**os.environ, "ANTHROPIC_API_KEY": "test", "NO_PROXY": "*", "no_proxy": "*",
            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_address[1]}"}
 
-    def send(messages):
+    def send(messages, stream=STREAM):
+        streams.append(stream)
         request = {"model": "claude-opus-5-5", "system": "", "messages": messages, "tools": [], "params": {}}
         done = subprocess.run([PROVIDER], input=json.dumps(request), env=env, capture_output=True, text=True, timeout=30)
         assert done.returncode == 0, done.stdout + done.stderr
-        assert json.loads(done.stdout.splitlines()[-1])["type"] == "result"
-        return bodies[-1]
+        result = json.loads(done.stdout.splitlines()[-1])
+        assert result["type"] == "result"
+        return bodies[-1], result
 
     yield send
     server.shutdown()
 
 
 def sent(api, messages):
-    return json.loads(api(messages))["messages"]
+    return json.loads(api(messages)[0])["messages"]
 
 
 def user(*blocks):
@@ -142,7 +149,7 @@ def test_kernel_only_fields_are_not_sent(api):
 
 def test_an_earlier_message_renders_the_same_whatever_follows(api):
     def ordered(messages):
-        return dict(json.loads(api(messages), object_pairs_hook=list))["messages"]
+        return dict(json.loads(api(messages)[0], object_pairs_hook=list))["messages"]
 
     whole = ordered(SESSION)
     for n in range(1, len(SESSION)):
@@ -166,3 +173,22 @@ def test_a_media_type_the_api_does_not_accept_is_replaced_by_a_note(api):
     [message] = sent(api, [user(text("look"), heic)])
     assert message["content"][1] == text(
         "[image omitted: image/heic is not a type the API accepts. The original is still in the session.]")
+
+
+def test_unparsable_tool_input_from_the_model_comes_back_as_a_string_in_the_tool_use(api):
+    _, answer = api([user(text("go"))], stream=sse(
+        {"type": "message_start", "message": {"usage": {"input_tokens": 1}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "tu_1", "name": "exec", "input": {}}},
+        *[{"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": d}}
+          for d in ["{\"argv\": s", "h, \"argv\": sh}"]],
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 9}},
+        {"type": "message_stop"}))
+    assert answer["message"]["content"] == [
+        {"type": "tool_use", "id": "tu_1", "name": "exec", "input": "{\"argv\": sh, \"argv\": sh}"}]
+
+
+def test_a_tool_use_whose_input_is_not_an_object_is_sent_with_an_empty_one(api):
+    call = {"role": "assistant", "content": [text("trying"), {"type": "tool_use", "id": "tu_1", "name": "exec", "input": "{\"argv\": sh}"}]}
+    assert sent(api, [user(text("go")), call, user(result("tu_1", "input is not a JSON object"))])[1] == {
+        "role": "assistant", "content": [text("trying"), {"type": "tool_use", "id": "tu_1", "name": "exec", "input": {}}]}

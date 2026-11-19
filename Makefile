@@ -10,7 +10,7 @@ SANITIZE  = -fsanitize=address,undefined -fno-omit-frame-pointer
 OBJ       = $(ROOT)/obj
 BIN       = $(ROOT)/bin
 
-KERNEL     = $(patsubst %,$(OBJ)/src/%.o,main loop driver calls files inbox proc ctl session msg json base)
+KERNEL     = $(patsubst %,$(OBJ)/src/%.o,main loop driver calls files inbox proc ctl sink session msg json base)
 SHARED     = $(OBJ)/src/json.o $(OBJ)/src/base.o
 FILE_TOOLS = $(BIN)/akern-edit
 PROVIDERS  = $(patsubst providers/%.c,$(ROOT)/providers/%,$(wildcard providers/*.c))
@@ -42,6 +42,9 @@ $(ROOT)/providers/mock: $(OBJ)/providers/mock.o $(SHARED)
 
 $(ROOT)/providers/anthropic: $(OBJ)/providers/anthropic.o $(SHARED)
 	$(LINK) $^ -lcurl
+
+$(ROOT)/providers/claude-code: $(OBJ)/providers/claude-code.o $(SHARED)
+	$(LINK) $^
 
 $(OBJ)/%.o: %.c src/*.h
 	@mkdir -p $(@D)

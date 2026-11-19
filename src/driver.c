@@ -1,17 +1,16 @@
 #include "driver.h"
 
 #include <fcntl.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "calls.h"
-#include "ctl.h"
 #include "inbox.h"
 #include "msg.h"
 #include "proc.h"
 #include "session.h"
+#include "sink.h"
 
 static const char *const state_names[] = { "idle", "stream", "aborting", "waiting" };
 
@@ -20,11 +19,17 @@ enum assistant_end { REPLY_COMPLETE, REPLY_ABORTED };
 
 static const unsigned WHEN_ANY = WHEN_NOW | WHEN_TURN | WHEN_IDLE;
 
+typedef struct held_entry {
+    char     *type, *parent_id;
+    json_list members;
+    json_buf  ref;
+} held_entry;
+
 static void report_error(driver *d, const char *where, span message)
 {
     d->error.n = 0;
     json_printf(&d->error, "{'where':%s,'message':%S}", where, message);
-    event_error(d->events, where, message);
+    event_error(d->sink, where, message);
 }
 
 static void append_message(driver *d, json message, const char *source, json meta)
@@ -33,7 +38,7 @@ static void append_message(driver *d, json message, const char *source, json met
     json_printf(&members, "'message':%R", message);
     if (meta.n) json_printf(&members, ",'meta':%R", meta);
     const char *id = session_append(d->session, "message", AT_HEAD, &members);
-    event(d->events, "{'type':'message','run':%d,'id':%s,'source':%s,'message':%R}",
+    event(d->sink, "{'type':'message','run':%d,'id':%s,'source':%s,'message':%R}",
           d->run, id, source, message);
     buf_free(&members);
 }
@@ -59,24 +64,14 @@ static void start_run(driver *d)
     d->run++;
     d->turn = 0;
     d->error.n = d->answer_text.n = 0;
-    event(d->events, "{'type':'run_start','run':%d}", d->run);
-}
-
-static void print_answer(driver *d, bool failed)
-{
-    if (d->answer_text.n) ctl_print(d->events, buf_span(&d->answer_text));
-    if (!failed) return;
-    buf message_text = { 0 };
-    json_text(json_get(buf_span(&d->error), "message"), &message_text);
-    fprintf(stderr, "akern-loop: %s\n", buf_cstr(&message_text));
-    buf_free(&message_text);
+    event(d->sink, "{'type':'run_start','run':%d}", d->run);
 }
 
 static void end_run(driver *d, const char *reason)
 {
     bool failed = strcmp(reason, "error") == 0;
-    if (d->config->print_answers) print_answer(d, failed);
-    event(d->events, "{'type':'run_end','run':%d,'reason':%s,'returned':[%r],'error':%R}",
+    sink_answer(d->sink, buf_span(&d->answer_text), failed ? buf_span(&d->error) : NOSPAN);
+    event(d->sink, "{'type':'run_end','run':%d,'reason':%s,'returned':[%r],'error':%R}",
           d->run, reason, buf_cstr(&d->returned_contents), failed ? buf_span(&d->error) : NOSPAN);
     d->last_run_failed = failed;
     d->returned_contents.n = 0;
@@ -90,7 +85,7 @@ static json provider_usage(const driver *d)
 
 static void end_turn(driver *d)
 {
-    event(d->events, "{'type':'turn_end','run':%d,'turn':%d,'usage':%R}", d->run, d->turn, provider_usage(d));
+    event(d->sink, "{'type':'turn_end','run':%d,'turn':%d,'usage':%R}", d->run, d->turn, provider_usage(d));
 }
 
 static char *read_file(const char *path)
@@ -135,17 +130,17 @@ static void on_provider_line(worker *w, enum stream s, span line)
 {
     driver *d = w->owner;
     if (s == ERR) {
-        event_notice(d->events, "provider", line);
+        event_notice(d->sink, "provider", line);
         return;
     }
     if (!json_valid(line)) {
-        event_error(d->events, "provider", S("invalid line from provider"));
+        event_error(d->sink, "provider", S("invalid line from provider"));
         return;
     }
     json type = json_get(line, "type");
     if (json_eq(type, "result")) buf_set(&d->provider_result, line);
-    else if (json_eq(type, "error")) buf_set(&d->error, line), event_raw(d->events, line);
-    else event_raw(d->events, line);
+    else if (json_eq(type, "error")) buf_set(&d->error, line), event_raw(d->sink, line);
+    else event_raw(d->sink, line);
 }
 
 static void on_provider_exit(worker *w)
@@ -173,7 +168,7 @@ static void spawn_provider(driver *d, json request)
     d->provider_exited = false;
     d->provider = proc_spawn(d->procs, &r);
     d->state = S_STREAM;
-    event(d->events, "{'type':'turn_start','run':%d,'turn':%d}", d->run, d->turn);
+    event(d->sink, "{'type':'turn_start','run':%d,'turn':%d}", d->run, d->turn);
     free(path);
 }
 
@@ -192,10 +187,29 @@ static void continue_run_with_inbox(driver *d, unsigned when_mask)
     begin_turn(d);
 }
 
+static void append_entry(driver *d, const char *type, const char *parent_id, const json_list *members, json ref)
+{
+    const char *id = session_append(d->session, type, parent_id, members);
+    if (id && ref.p) event(d->sink, "{'type':'ok','id':%s,'ref':%R}", id, ref);
+}
+
+static void append_held_entries(driver *d)
+{
+    for (size_t i = 0; i < d->nheld; i++) {
+        held_entry *h = &d->held[i];
+        append_entry(d, h->type, h->parent_id, &h->members, h->ref.n ? buf_span(&h->ref) : NOSPAN);
+        free(h->type);
+        free(h->parent_id);
+        buf_free(&h->members);
+        buf_free(&h->ref);
+    }
+    d->nheld = 0;
+}
+
 static bool settle(driver *d, const char *reason)
 {
-    ctl_append_deferred_entries(d->ctl);
-    if (inbox_due(d->inbox, WHEN_ANY, 0)) continue_run_with_inbox(d, WHEN_ANY);
+    append_held_entries(d);
+    if (inbox_due(d->inbox, WHEN_ANY)) continue_run_with_inbox(d, WHEN_ANY);
     else end_run(d, reason);
     return true;
 }
@@ -228,8 +242,8 @@ static json append_assistant_message(driver *d, enum assistant_end end)
 
 static bool idle(driver *d)
 {
-    ctl_append_deferred_entries(d->ctl);
-    if (!inbox_due(d->inbox, WHEN_ANY, 0)) return false;
+    append_held_entries(d);
+    if (!inbox_due(d->inbox, WHEN_ANY)) return false;
     start_run(d);
     continue_run_with_inbox(d, WHEN_ANY);
     return true;
@@ -247,7 +261,7 @@ static bool streamed(driver *d)
     bool wants_tools = json_eq(json_get(buf_span(&d->provider_result), "stop"), "tool_use");
     if (wants_tools && calls_start(d->calls, message, d->run, d->turn)) {
         d->state = S_WAITING;
-        d->inbox_items_before_wait = inbox_size(d->inbox);
+        inbox_mark(d->inbox);
         return true;
     }
     end_turn(d);
@@ -273,7 +287,7 @@ static bool resolved(driver *d)
 
 static bool preempt(driver *d)
 {
-    event(d->events, "{'type':'preempt','run':%d,'turn':%d}", d->run, d->turn);
+    event(d->sink, "{'type':'preempt','run':%d,'turn':%d}", d->run, d->turn);
     proc_term(d->provider);
     d->abort_ends_run = false;
     d->state = S_ABORTING;
@@ -317,16 +331,54 @@ static bool abort_run(driver *d)
     return true;
 }
 
+static void use_model(driver *d, char *provider_model)
+{
+    free(d->provider_model);
+    d->provider_model = provider_model;
+    setenv("AKERN_MODEL", provider_model, 1);
+}
+
+void driver_open(driver *d)
+{
+    use_model(d, xstrdup(d->config->provider_model));
+    d->system_path = xstrdup(d->config->system_path);
+    buf_set(&d->param_members, buf_span(&d->config->param_members));
+}
+
+void driver_set(driver *d, json model, json system_path, json params)
+{
+    char *text;
+    if ((text = json_text_dup(model))) use_model(d, text);
+    if ((text = json_text_dup(system_path))) free(d->system_path), d->system_path = text;
+    if (json_is(params, '{')) {
+        json object = json_trim(params);
+        buf_set(&d->param_members, json_trim((span){ object.p + 1, object.n - 2 }));
+    }
+}
+
+bool driver_append(driver *d, const char *type, const char *parent_id, const json_list *members, json ref)
+{
+    if (parent_id == AT_HEAD) append_entry(d, type, AT_HEAD, members, ref);
+    else if (*parent_id && !session_has_entry(d->session, parent_id)) return false;
+    else {
+        held_entry h = { .type = xstrdup(type), .parent_id = xstrdup(parent_id) };
+        buf_set(&h.members, buf_span(members));
+        buf_set(&h.ref, ref);
+        VEC_PUSH(d->held, d->nheld, d->capheld, h);
+    }
+    return true;
+}
+
 bool driver_advance(driver *d)
 {
     if (d->abort_requested) return abort_run(d);
-    if (d->state == S_STREAM && inbox_due(d->inbox, WHEN_NOW, 0)) return preempt(d);
+    if (d->state == S_STREAM && inbox_due(d->inbox, WHEN_NOW)) return preempt(d);
     switch (d->state) {
     case S_IDLE:     return idle(d);
     case S_STREAM:   return d->provider_exited && streamed(d);
     case S_ABORTING: return d->provider_exited && aborted(d);
     case S_WAITING:
-        return (calls_turn_settled(d->calls) || inbox_due(d->inbox, WHEN_NOW | WHEN_TURN, d->inbox_items_before_wait))
+        return (calls_turn_settled(d->calls) || inbox_due_since_mark(d->inbox, WHEN_NOW | WHEN_TURN))
             && resolved(d);
     }
     return false;
@@ -374,7 +426,7 @@ void driver_status(const driver *d, json_buf *status)
 
 bool driver_quiescent(const driver *d)
 {
-    return d->state == S_IDLE && !d->abort_requested && !inbox_due(d->inbox, WHEN_ANY, 0)
+    return d->state == S_IDLE && !d->abort_requested && !inbox_due(d->inbox, WHEN_ANY)
         && calls_running_jobs(d->calls) == 0;
 }
 

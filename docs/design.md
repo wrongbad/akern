@@ -15,8 +15,8 @@ and messages that interrupt a turn are part of the kernel from the start.
 
 ## Goals
 
-- **Smallest kernel that is still a complete agent.** Budget: 3,000 lines of
-  C99, POSIX only, no libraries, no threads. Readable in an afternoon.
+- **Smallest kernel that is still a complete agent.** C99, POSIX only, no
+  libraries, no threads. Readable in an afternoon.
 - **Concurrency is core, not a feature.** Parallel tool calls, background jobs,
   steering at any moment, and sub-agents are designed in from the first
   milestone. They are what stress an agent architecture, and retrofitting them
@@ -79,6 +79,26 @@ and messages that interrupt a turn are part of the kernel from the start.
     `gh`, a project's scripts). A capability added for people is automatically
     available to the model, and the reverse. No wrappers: a wrapper exists
     only because an API is missing, so fix the API instead.
+13. **Every completion wakes the model.** A finished command or job is always
+    delivered; no option suppresses or defers a completion to save tokens
+    ([concurrency.md](concurrency.md#the-inbox-and-delivery-modes)). A silent
+    exit, like a crashed dev server, can ruin a long unattended session. A
+    person may still send their own message `deferred`.
+14. **The call names the media type.** `read`'s `type` and `exec`'s
+    `stdout_type` are free MIME strings. The kernel sniffs no bytes and keeps
+    no list of formats: `image/*` becomes an image block, anything else a
+    document block. What an API accepts (types, sizes, pixel limits) lives in
+    its provider, which swaps anything unsupported for a text note. A fixed
+    list goes stale, and the model judges file types better.
+15. **Tools don't know each other.** A tool's output, errors and usage text
+    included, never names another tool or built-in, and an error states the
+    problem, never a remedy. Advice, and how tools fit together, belongs in
+    skills. Naming a sibling couples them; any program must be replaceable
+    without another's text going stale.
+16. **Docs mirror directories and executables.** One reference doc per
+    directory or executable ([akern-loop.md](akern-loop.md) for the kernel's
+    CLI), not per concept; concept docs link to it instead of re-explaining.
+    A component's contract is then found in one place.
 
 ### The model's toolset: three primitives
 
@@ -88,7 +108,7 @@ Like an OS kernel's core syscalls, the agent kernel gives the model `exec`,
 told, nothing more:
 
 ```json
-{"name":"exec","description":"Run a program. … The result is JSON: {stdout, stderr, exit} …",
+{"name":"exec","description":"Run a program. … The result is a JSON object with stdout, stderr and exit …",
  "input_schema":{"type":"object","properties":{
    "argv":{"type":"array","items":{"type":"string"}},"stdin":{"type":"string"},"stdin_open":{"type":"boolean"},
    "wait":{"type":"boolean"},"stdout_type":{"type":"string"},
@@ -121,8 +141,7 @@ but the smallest possible one: it is `execve`.
 `read` and `write` run inside the kernel and finish at once. `read` returns a
 file's exact text, 2000 lines at a time from `offset` (at most 100000 bytes,
 with a note saying where to read on), or, given a MIME `type`, the file as an
-image or document block. The kernel keeps no list of formats; the provider
-knows which ones its API accepts. `write` replaces a file atomically or appends to
+image or document block (principle 14). `write` replaces a file atomically or appends to
 it, and the content never passes through a shell. Neither runs a program, so no
 shim sees them; an OS sandbox around the kernel confines them.
 

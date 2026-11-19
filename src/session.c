@@ -1,17 +1,12 @@
 #include "session.h"
 
-#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
-
-#include "ctl.h"
-#include "loop.h"
 
 enum { NEW_ID_CHARS = 8, FIRST_INDEX_SLOTS = 1024 };
 
@@ -102,28 +97,17 @@ static void new_id(session *s, char id[NEW_ID_CHARS + 1])
     } while (find_entry(s, id) >= 0);
 }
 
-static bool append_line(session *s, span line)
-{
-    for (size_t done = 0; done < line.n;) {
-        ssize_t n = write(s->fd, line.p + done, line.n - done);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return false;
-        done += (size_t)n;
-    }
-    return true;
-}
-
 static void lock_owner(session *s)
 {
     buf path = { 0 };
-    buf_printf(&path, "%s.owner", s->path);
+    buf_printf(&path, "%s.owner", s->config->session_path);
     s->owner_lock_fd = open(buf_cstr(&path), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     struct flock lk = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
     if (s->owner_lock_fd < 0) die("%s: %s", path.p, strerror(errno));
     if (fcntl(s->owner_lock_fd, F_SETLK, &lk) < 0) {
         char owner_json[256] = { 0 };
         pread(s->owner_lock_fd, owner_json, sizeof owner_json - 1, 0);
-        die("session %s is owned by another kernel (pid %d)", s->path,
+        die("session %s is owned by another kernel (pid %d)", s->config->session_path,
             (int)json_num(json_get(S(owner_json), "pid"), 0));
     }
     json_buf owner = { 0 };
@@ -134,16 +118,6 @@ static void lock_owner(session *s)
     buf_free(&path);
 }
 
-static char *anonymous_path(const char *tmp_dir)
-{
-    buf path = { 0 };
-    buf_printf(&path, "%s/akern-session-XXXXXX", tmp_dir);
-    int fd = mkstemp(buf_cstr(&path));
-    if (fd < 0) die("mkstemp: %s", strerror(errno));
-    close(fd);
-    return path.p;
-}
-
 static void write_header(session *s)
 {
     char id[NEW_ID_CHARS + 1], cwd[4096];
@@ -151,7 +125,7 @@ static void write_header(session *s)
     new_id(s, id);
     json_printf(&line, "{'type':'session','v':1,'id':%s,'cwd':%s,'created':%D}\n",
                 id, getcwd(cwd, sizeof cwd) ? cwd : "", unix_seconds());
-    if (!append_line(s, buf_span(&line))) die("%s: %s", s->path, strerror(errno));
+    if (!write_all(s->fd, buf_span(&line))) die("%s: %s", s->config->session_path, strerror(errno));
     s->file_size += (off_t)line.n;
     buf_free(&line);
 }
@@ -159,9 +133,8 @@ static void write_header(session *s)
 void session_open(session *s)
 {
     s->id_rng = (uint64_t)unix_seconds() ^ ((uint64_t)getpid() << 32) ^ (uint64_t)(monotonic_seconds() * 1e9);
-    s->path = s->config->session_path ? xstrdup(s->config->session_path) : anonymous_path(s->config->tmp_dir);
-    s->fd = open(s->path, O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-    if (s->fd < 0) die("%s: %s", s->path, strerror(errno));
+    s->fd = open(s->config->session_path, O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (s->fd < 0) die("%s: %s", s->config->session_path, strerror(errno));
     lock_owner(s);
     index_file(s);
     if (s->file_size == 0) write_header(s);
@@ -172,8 +145,8 @@ void session_close(session *s)
     if (s->owner_lock_fd >= 0) ftruncate(s->owner_lock_fd, 0);
 }
 
-const char *session_path(const session *s)    { return s->path; }
 const char *session_head_id(const session *s) { return s->head_id; }
+bool        session_failed(const session *s)  { return s->failed; }
 
 bool session_has_entry(const session *s, const char *id)
 {
@@ -183,6 +156,7 @@ bool session_has_entry(const session *s, const char *id)
 const char *session_append(session *s, const char *type, const char *parent_id, const json_list *members)
 {
     char id[NEW_ID_CHARS + 1];
+    if (s->failed) return NULL;
     new_id(s, id);
     const char *parent = parent_id == AT_HEAD ? s->head_id : parent_id;
     json_buf line = { 0 };
@@ -190,14 +164,10 @@ const char *session_append(session *s, const char *type, const char *parent_id, 
     if (members->n) buf_putc(&line, ',');
     buf_putspan(&line, buf_span(members));
     buf_puts(&line, "}\n");
-    if (!append_line(s, buf_span(&line))) {
-        event_error(s->events, "kernel", S("session append failed; stopping"));
-        shutdown_kernel(s->loop, 1);
-    }
-    index_line(s, (json){ line.p, line.n - 1 }, s->file_size);
-    s->file_size += (off_t)line.n;
+    s->failed = !write_all(s->fd, buf_span(&line));
+    if (!s->failed) index_line(s, (json){ line.p, line.n - 1 }, s->file_size), s->file_size += (off_t)line.n;
     buf_free(&line);
-    return s->head_id;
+    return s->failed ? NULL : s->head_id;
 }
 
 static void put_message_of(const session *s, json_buf *messages, const entry *e)
@@ -224,17 +194,4 @@ void session_context(const session *s, json_buf *messages)
     while (n--) put_message_of(s, messages, &s->entries[lineage[n]]);
     buf_putc(messages, ']');
     free(lineage);
-}
-
-char *session_prepare_path(const session *s, const char *subdir, const char *stem, const char *ext)
-{
-    buf path = { 0 };
-    buf_printf(&path, "%s.d", s->path);
-    mkdir(path.p, 0755);
-    buf_printf(&path, "/%s", subdir);
-    mkdir(path.p, 0755);
-    buf_putc(&path, '/');
-    for (const char *p = stem; *p; p++) buf_putc(&path, isalnum((unsigned char)*p) || *p == '-' ? *p : '_');
-    buf_printf(&path, ".%s", ext);
-    return path.p;
 }

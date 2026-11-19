@@ -7,9 +7,10 @@ document is one way to implement them and is free to change.
 ## Constraints
 
 - C99, POSIX.1-2008. No third-party libraries. **No threads.**
-- One translation unit per concern, one `Makefile`, no build generator.
-- Hard budget: **3,000 lines** for the kernel. A feature that does not fit is
-  a sign it belongs outside.
+- One source file per real component: its own process, binary or kernel
+  concern. Never split one into helper files to keep files small; the file
+  layout should show the system's shape.
+- One `Makefile`, no build generator.
 - Compiles clean with `-Wall -Wextra -Wpedantic -Werror`; tests run under ASan
   and UBSan.
 - Linux-only facilities (`PR_SET_PDEATHSIG`) are used behind `#ifdef` as
@@ -22,24 +23,28 @@ component; the kernel's files are its concerns. Current line counts:
 
 ```
 src/            the kernel, akern-loop (each .c with a matching .h)
-  loop.c        main(), options, the poll loop, timers, signals          292
-  driver.c      the conversation state machine, the wake rule, delivery  393
-  calls.c       the tools: calls, exec, pending calls, jobs,             557
+  main.c        main(), options and environment defaults, wiring the     221
+                kernel's modules into one root
+  loop.c        the poll loop, timers, signals, when the kernel exits    144
+  driver.c      the conversation state machine, the wake rule, delivery, 441
+                every session append, provider settings
+  calls.c       the tools: calls, exec, pending calls, jobs,             585
                 writing to a job's stdin
-  files.c       read and write for paths: line ranges, media by the      183
+  files.c       read and write for paths: line ranges, media by the      172
                 call's type, atomic replace
-  inbox.c       queued items, delivery modes                              89
-  proc.c        worker table, spawn, process groups, kill escalation,    288
+  inbox.c       queued items, delivery modes                             121
+  proc.c        worker table, spawn, process groups, kill escalation,    284
                 stdin pipes
-  ctl.c         commands from stdin, events to stdout                    335
-  session.c     ownership, index, append, chain walk                     252
+  ctl.c         commands from stdin                                      192
+  sink.c        events (or -p answers) to stdout, the backlog             93
+  session.c     ownership, index, append, chain walk                     197
   msg.c         content blocks and messages                              114
   json.c        span scanner, string decode, writer                      308
   base.c        buffers, spans, string vectors, clocks                   172
 providers/      anthropic.c (the only file that links libcurl), mock.c
-tools/          the command-line programs: C (akern-edit) and shell (akern)
+tools/          the command-line programs: C (akern-edit) and shell (akern), and
+                render.jq, how `akern "prompt"` shows events: a jq program, not code
 skills/         akern/SKILL.md, files/SKILL.md
-render.jq       how `akern "prompt"` shows events: a jq program, not code
 tests/          pytest scenarios (conftest.py fixtures, invariants.py), and bin/ with
                 the gate and sleeper test tools; `make smoke` runs them in build/venv
 Makefile
@@ -54,7 +59,7 @@ build/
   providers/    anthropic, mock
   skills/       copied from skills/
   system.md     the skills listed, as `make install` writes it to ~/.akern
-  render.jq     copied from render.jq
+  render.jq     copied from tools/render.jq
   obj/          object files, mirroring the source tree
   venv/         pytest, for `make smoke`
   asan/         the same layout, built with AddressSanitizer and UBSan
@@ -103,6 +108,8 @@ typedef struct {                  /* calls.c: one tool_use block          */
 typedef struct {                  /* inbox.c: an inbox entry              */
     enum source source;           /* FROM_PROMPT, FROM_JOB, FROM_INJECT   */
     enum when   when;             /* WHEN_NOW, _TURN, _IDLE, _DEFERRED    */
+    size_t      seq;              /* arrival order, compared with the mark
+                                     set when the driver starts waiting   */
     json_buf    content;
 } item;
 ```
@@ -126,7 +133,8 @@ while (!(stopping() && proc_count() == 0)) {
     proc_escalate_kills(now);     /* SIGKILL once --kill-grace has passed */
     until nothing moves: proc_deliver_exits() → on_exit,
                          calls_advance(), driver_advance()
-    if quiescent and (stdin closed, or -p and it has run): shutdown_kernel()
+    if a session append failed, or quiescent and (stdin closed, or -p and it
+    has run): shutdown_kernel()
 }
 ```
 
@@ -191,7 +199,8 @@ order.
 
 - `calls_start()` creates one `call` per `tool_use` block. An `exec` call
   waits (`WAITING`) for a free worker slot (`--max-processes`), then moves to
-  `RUNNING`; `read`, `write` and an unknown name finish at once (`DONE`).
+  `RUNNING`; `read`, `write`, an unknown name and an `input` that is not a
+  JSON object finish at once (`DONE`).
 - **Output limit**: each stream is kept in memory up to the call's
   `stdout_limit` or `stderr_limit`. The first byte past it opens
   `<session>.d/calls/<call id>.out` (or `.err`), writes what was collected, and
@@ -233,8 +242,10 @@ order.
   reverse, `pread` each line into a temporary buffer and copy its `message`
   member into the request.
 - `append` without `parent`: applied immediately with the current head
-  as parent. With `parent`: held in a deferred list and applied in
+  as parent. With `parent`: held by the driver and applied in
   `settle()` or `IDLE`, before delivery.
+- A failed append marks the session failed; it appends nothing after that.
+  The loop sees the flag after the step that failed and shuts down.
 
 ## Processes
 
@@ -280,10 +291,11 @@ Effects of `SIGINT`, `SIGTERM` and `SIGHUP`: [akern-loop.md §2](akern-loop.md#e
 |---|---|
 | Provider exits without a `result` line | `error` event, run ends with `error` unless inbox items are due; a front end may retry on `run_end` |
 | Tool cannot be found or executed | error `tool_result`; the run continues |
+| The model's tool input is not a JSON object | error `tool_result`; the run continues |
 | Tool exits non-zero | `is_error: true`; the run continues |
 | Provider writes an invalid line | line dropped, `error` event |
 | An invalid command on stdin | `error` event (with its `ref`); nothing else changes |
-| Session append fails | fatal: `error` event, cascade shutdown, exit 1. The log is the state, so continuing without it would mean the log no longer matches what happened |
+| Session append fails | fatal: no later append, `error` event, cascade shutdown, exit 1. The log is the state, so continuing without it would mean the log no longer matches what happened |
 
 The kernel never retries anything. Retrying a model call is the provider's
 decision; retrying a run is the front end's.

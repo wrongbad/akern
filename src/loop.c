@@ -12,10 +12,12 @@
 #include "ctl.h"
 #include "driver.h"
 #include "proc.h"
+#include "session.h"
+#include "sink.h"
 
 enum {
     EXIT_INTERRUPTED      = 130,
-    DOUBLE_SIGINT_SECONDS = 1,
+    DOUBLE_SIGINT_SECONDS = 3,
     MAX_POLL_MS           = 60000,
 };
 
@@ -44,8 +46,11 @@ void shutdown_kernel(loop *l, int exit_code)
 static void on_sigint(loop *l)
 {
     double now = monotonic_seconds();
-    if (now - l->last_sigint_at < DOUBLE_SIGINT_SECONDS) shutdown_kernel(l, EXIT_INTERRUPTED);
-    else driver_abort(l->driver, KEEP_JOBS);
+    if (l->stopping || now - l->last_sigint_at < DOUBLE_SIGINT_SECONDS) shutdown_kernel(l, EXIT_INTERRUPTED);
+    else {
+        event(l->sink, "{'type':'interrupt','quit_within':%d}", DOUBLE_SIGINT_SECONDS);
+        driver_abort(l->driver, KEEP_JOBS);
+    }
     l->last_sigint_at = now;
 }
 
@@ -99,9 +104,9 @@ static void wait_for_io(loop *l)
     poll_set *set = &l->watched;
     set->n = 0;
     watch_once(set, l->signal_fd, POLLIN, on_signal, l);
-    if (l->stopping) ctl_watch_output(l->ctl, set);
-    else ctl_watch(l->ctl, set);
-    proc_watch(l->procs, set, ctl_backlogged(l->ctl));
+    sink_watch(l->sink, set);
+    if (!l->stopping) ctl_watch(l->ctl, set);
+    proc_watch(l->procs, set, sink_backlogged(l->sink));
 
     if (poll(set->fds, (nfds_t)set->n, poll_timeout_ms(l)) < 0 && errno != EINTR) die("poll: %s", strerror(errno));
     for (size_t i = 0; i < set->n; i++)
@@ -115,6 +120,10 @@ static void advance(loop *l)
 {
     for (bool moved = true; moved;) {
         moved = proc_deliver_exits(l->procs);
+        if (!l->stopping && session_failed(l->session)) {
+            event_error(l->sink, "kernel", S("session append failed; stopping"));
+            shutdown_kernel(l, 1);
+        }
         if (l->stopping) continue;
         moved |= calls_advance(l->calls);
         moved |= driver_advance(l->driver);

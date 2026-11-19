@@ -1,5 +1,6 @@
 #include "main.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <float.h>
 #include <getopt.h>
@@ -9,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "calls.h"
 #include "ctl.h"
@@ -17,6 +19,7 @@
 #include "loop.h"
 #include "proc.h"
 #include "session.h"
+#include "sink.h"
 
 enum { DEFAULT_RECURSION_LIMIT = 4 };
 
@@ -36,6 +39,7 @@ static const struct option long_options[] = {
 
 struct kernel {
     config  config;
+    sink    sink;
     session session;
     procs   procs;
     inbox   inbox;
@@ -114,13 +118,24 @@ static char *home_file(const config *cfg, const char *name)
     return path.p;
 }
 
+static char *new_session_path(void)
+{
+    const char *tmp_dir = getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
+    buf path = { 0 };
+    buf_printf(&path, "%s/akern-session-XXXXXX", tmp_dir);
+    int fd = mkstemp(buf_cstr(&path));
+    if (fd < 0) die("mkstemp: %s", strerror(errno));
+    close(fd);
+    return path.p;
+}
+
 static int parse_args(config *cfg, int argc, char **argv)
 {
     *cfg = (config){ .max_processes = 32, .kill_grace_seconds = 2, .max_line_bytes = 64u << 20 };
     for (int ch; (ch = getopt_long(argc, argv, "+ps:m:S:P:", long_options, NULL)) != -1;) {
         switch (ch) {
         case 'p':            cfg->print_answers = true; break;
-        case 's':            cfg->session_path = optarg; break;
+        case 's':            cfg->session_path = xstrdup(optarg); break;
         case 'm':            cfg->provider_model = xstrdup(optarg); break;
         case 'S':            cfg->system_path = xstrdup(optarg); break;
         case 'P':            add_param(cfg, optarg); break;
@@ -137,7 +152,7 @@ static int parse_args(config *cfg, int argc, char **argv)
         die("recursion limit reached: this kernel would be nested too deep (AKERN_RECURSION_LIMIT)");
     cfg->home_dir = home_dir();
     if (!cfg->system_path) cfg->system_path = home_file(cfg, "system.md");
-    cfg->tmp_dir = getenv("TMPDIR") && *getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp";
+    if (!cfg->session_path) cfg->session_path = new_session_path();
     buf_cstr(&cfg->param_members);
     return optind;
 }
@@ -148,32 +163,27 @@ static void keep_std_fds_open(void)
         if (fcntl(fd, F_GETFD) < 0 && open("/dev/null", O_RDWR) != fd) die("cannot open /dev/null");
 }
 
-static void export_env(const config *cfg)
+static void export_recursion_limit(const config *cfg)
 {
     char below[16];
     snprintf(below, sizeof below, "%d", cfg->recursion_limit - 1);
     setenv("AKERN_RECURSION_LIMIT", below, 1);
-    setenv("AKERN_MODEL", cfg->provider_model, 1);
 }
 
 static void wire(struct kernel *k)
 {
     const config *cfg = &k->config;
-    sink *events = &k->ctl.out;
-    k->session = (session){ .config = cfg, .events = events, .loop = &k->loop };
+    sink *out = &k->sink;
+    k->session = (session){ .config = cfg };
     k->procs   = (procs){ .config = cfg };
-    k->inbox   = (inbox){ .events = events };
-    k->calls   = (calls){ .config = cfg, .events = events, .procs = &k->procs, .inbox = &k->inbox,
-                          .session = &k->session };
-    k->driver  = (driver){ .config = cfg, .events = events, .ctl = &k->ctl, .calls = &k->calls,
-                           .inbox = &k->inbox, .procs = &k->procs, .session = &k->session,
-                           .provider_model = xstrdup(cfg->provider_model),
-                           .system_path = xstrdup(cfg->system_path) };
-    buf_set(&k->driver.param_members, buf_span(&cfg->param_members));
-    k->ctl     = (ctl){ .config = cfg, .inbox = &k->inbox, .driver = &k->driver, .calls = &k->calls,
-                        .session = &k->session };
-    k->loop    = (loop){ .config = cfg, .driver = &k->driver, .procs = &k->procs, .calls = &k->calls,
-                         .ctl = &k->ctl };
+    k->inbox   = (inbox){ .sink = out };
+    k->calls   = (calls){ .config = cfg, .sink = out, .procs = &k->procs, .inbox = &k->inbox };
+    k->driver  = (driver){ .config = cfg, .sink = out, .calls = &k->calls, .inbox = &k->inbox,
+                           .procs = &k->procs, .session = &k->session };
+    k->ctl     = (ctl){ .config = cfg, .sink = out, .inbox = &k->inbox, .driver = &k->driver,
+                        .calls = &k->calls };
+    k->loop    = (loop){ .config = cfg, .sink = out, .ctl = &k->ctl, .driver = &k->driver,
+                         .calls = &k->calls, .procs = &k->procs, .session = &k->session };
 }
 
 static void queue_argv_prompt(inbox *in, int nwords, char **words)
@@ -195,16 +205,17 @@ int main(int argc, char **argv)
     keep_std_fds_open();
     wire(&k);
     loop_open(&k.loop);
-    ctl_open(&k.ctl);
+    sink_open(&k.sink, k.config.print_answers);
     session_open(&k.session);
-    export_env(&k.config);
-    event(&k.ctl.out, "{'type':'hello','protocol':1,'session':%s,'head':%s,'model':%s}",
-          session_path(&k.session), session_head_id(&k.session), k.driver.provider_model);
+    driver_open(&k.driver);
+    export_recursion_limit(&k.config);
+    event(&k.sink, "{'type':'hello','protocol':1,'session':%s,'head':%s,'model':%s}",
+          k.config.session_path, session_head_id(&k.session), k.driver.provider_model);
     queue_argv_prompt(&k.inbox, argc - first, argv + first);
 
     int exit_code = loop_run(&k.loop);
     driver_append_leftover_results(&k.driver);
-    ctl_flush(&k.ctl);
+    sink_flush(&k.sink);
     session_close(&k.session);
     return exit_code;
 }

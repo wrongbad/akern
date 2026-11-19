@@ -49,7 +49,10 @@ so other providers translate down from it rather than the kernel translating up.
 Rules the kernel depends on:
 
 - An assistant message's tool calls are its `tool_use` blocks, each with `id`,
-  `name`, `input`.
+  `name`, `input`. `input` is a JSON object, or a string holding the model's
+  raw text when that text was not a JSON object (§4). The kernel answers such
+  a call with an error `tool_result`, `input is not a JSON object: ` and the
+  text, clipped to 200 bytes; the other calls of the message run as usual.
 - All answers for one assistant message go back in **one** user message, one
   block per call, in call order, before any other blocks. A call that is
   finished or cancelled gets a `tool_result`. A call still in progress gets a
@@ -206,6 +209,11 @@ Rules:
   `context_overflow`, `invalid_request`, `network`, `other`. `context_overflow`
   matters: it is how a front end knows to compact and retry after `run_end`.
 - Exit `0` if and only if a `result` line was written.
+- A `tool_use` whose streamed input does not parse as a JSON object is still
+  part of the `result`, with `input` as a string holding the raw text (§1);
+  empty input is `{}`. It is not an `error`: the model gets the call's error
+  result and can try again. When rendering history, the provider sends such
+  an `input` as `{}`, since the API takes only an object there.
 - The provider owns everything API-specific: credentials, retries and backoff,
   server-tool pauses, cache breakpoint placement, format translation, and
   **the API's limits**. Content the API would reject (a media type it does not
@@ -229,6 +237,40 @@ Rules:
   come first. Its list of accepted media types is `ACCEPTED_MEDIA`; any other
   becomes `[image omitted: image/heic is not a type the API accepts. The
   original is still in the session.]`.
+- `providers/claude-code` runs each request as one turn of the `claude` CLI
+  (`claude -p`), on the user's Claude Code subscription; its usage counts
+  against the subscription's programmatic credit. It goes through the binary
+  only and never touches Claude Code's credentials. `-m claude-code/sonnet`
+  passes `sonnet` to `--model` (an alias or a full model id; `--models` lists
+  the aliases), `params.effort` becomes `--effort` and `params.max_tokens`
+  `CLAUDE_CODE_MAX_OUTPUT_TOKENS`. Claude Code's own tools, CLAUDE.md files,
+  memory, settings, skills, other MCP servers, compaction and advisor are off
+  (`--tools ""`, `--setting-sources ""`, `--disable-slash-commands`,
+  `--strict-mcp-config`, `CLAUDE_CODE_DISABLE_*`, `DISABLE_COMPACT`). The
+  request's tools reach the model through an MCP server, the provider itself
+  run as `claude-code --mcp TOOLS`, so the model calls them as
+  `mcp__akern__exec` and so on. `--permission-mode dontAsk` refuses every call
+  and `--max-turns 1` ends the turn after the first response, so the
+  `tool_use` blocks come back unrun; the provider gives them their akern names
+  again, and adds the prefix to earlier ones in the history. The history is
+  rendered as `providers/anthropic` renders it, media limits included, and
+  sent as `--input-format stream-json` messages, all but the last with
+  `shouldQuery: false`. `claude` appends an assistant message as soon as it
+  reads it but queues user messages, so the provider writes the next message
+  only after `claude` acknowledges a queued one with a `result` line.
+  `--include-partial-messages` carries the API's stream events, which map to
+  `text_delta`, `tool_use_*`, usage and `stop` as in `providers/anthropic`; a
+  failed turn's `api_error_status` and text pick the `error.kind`.
+  What it loses against `providers/anthropic`: the system prompt is not the
+  request's alone (Claude Code adds an identity line, an environment block and
+  context reminders such as the date and the account's email); the prompt
+  cache holds only the system prompt and tools, since those reminders sit at
+  the end of each request; thinking arrives without its text, so nothing shows
+  as `thinking_delta` (the signed blocks are still kept and replayed); there
+  are no server-side fallbacks, no `cache_control`, and no retries but
+  Claude Code's own; the model knows the tools by their `mcp__akern__` names;
+  and each request starts a `claude` process, which takes a second or two
+  before the model is called.
 - An API with asynchronous tool results, such as a future OpenAI provider,
   could send a `job_result` as a native `function_call_output` instead.
 - `<provider> --models` prints one JSON line per model:
@@ -248,7 +290,7 @@ Everything else the model can do is a program it runs with `exec`, explained
 by a skill (§8).
 
 ```json
-{"name":"exec","description":"Run a program. … The result is JSON: {stdout, stderr, exit} …",
+{"name":"exec","description":"Run a program. … The result is a JSON object with stdout, stderr and exit …",
  "input_schema":{"type":"object","properties":{
    "argv":{"type":"array","items":{"type":"string"},"minItems":1},
    "stdin":{"type":"string"},
@@ -260,7 +302,8 @@ by a skill (§8).
 ```
 
 A call to any other name gets an error result (`Unknown tool: X. The tools are
-exec, read and write.`). `read` and
+exec, read and write.`), and so does a call whose `input` is not a JSON object
+(§1). `read` and
 `write` are [below](#read-and-write).
 
 ### exec input
@@ -466,9 +509,12 @@ commands: `gh`, `psql`, an MCP bridge, a project's own scripts.
   path as the first argument, and show the command's stdout. The shell and the prompt line share one
   namespace.
 - `akern "some text"` runs
-  `akern-loop -- "$*" | jq --unbuffered -rj -f "$AKERN_HOME/render.jq"` with
+  `akern-loop -- "$*" | jq -n --unbuffered -rj -f "$AKERN_HOME/render.jq"` with
   stdin still the terminal: after the first prompt every line typed is sent
   too, steering the agent if it is working (§3), and Ctrl-D ends. `akern`
-  alone is the same without a first prompt. Scripts that want one answer use
+  alone is the same without a first prompt. Whenever the state changes,
+  render.jq prints a dim status line: `… working` while a run is active,
+  `⏵ N jobs running · waiting for input` while `tool_pending` calls have no
+  `job_result` yet, `› waiting for input` otherwise. Scripts that want one answer use
   `akern-loop -p "…"`. The renderer is data: edit `render.jq` to change what
   is shown.

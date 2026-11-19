@@ -463,6 +463,36 @@ static void put_user_blocks(json_buf *out, jiter messages, user_block_group grou
     }
 }
 
+static void put_tool_use(json_buf *out, json tool_use)
+{
+    jiter it = json_iter(tool_use);
+    bool first = true;
+    buf_putc(out, '{');
+    for (json k, v; json_next(&it, &k, &v); first = false) {
+        json_printf(out, "%r%R:", first ? "" : ",", k);
+        if (json_eq(k, "input") && !json_is(v, '{')) buf_puts(out, "{}");
+        else buf_putspan(out, v);
+    }
+    buf_putc(out, '}');
+}
+
+static void put_assistant(json_buf *out, json message)
+{
+    json content = json_get(message, "content");
+    if (!json_is(content, '[')) {
+        buf_putspan(out, message);
+        return;
+    }
+    buf_puts(out, "{\"role\":\"assistant\",\"content\":[");
+    jiter it = json_iter(content);
+    for (json block; json_next(&it, NULL, &block);) {
+        comma_unless_first(out);
+        if (json_eq(json_get(block, "type"), "tool_use")) put_tool_use(out, block);
+        else buf_putspan(out, block);
+    }
+    buf_puts(out, "]}");
+}
+
 static void put_rendered_messages(json_buf *out, json messages)
 {
     jiter it = json_iter(messages), at = it;
@@ -474,7 +504,7 @@ static void put_rendered_messages(json_buf *out, json messages)
         merging = user;
         comma_unless_first(out);
         if (!user) {
-            buf_putspan(out, message);
+            put_assistant(out, message);
             continue;
         }
         buf_puts(out, "{\"role\":\"user\",\"content\":[");
@@ -680,19 +710,12 @@ static bool keep_block(const block *b, outcome o)
     }
 }
 
-static json tool_input(block *b)
+static void put_tool_input(json_buf *out, const block *b)
 {
     json input = json_trim(buf_span(&b->input_json));
-    return input.n ? input : S("{}");
-}
-
-static bool tool_inputs_valid(void)
-{
-    for (size_t i = 0; i < st.nblocks; i++)
-        if (st.blocks[i].kind == BLOCK_TOOL_USE && keep_block(&st.blocks[i], COMPLETE)
-            && !json_valid(tool_input(&st.blocks[i])))
-            return false;
-    return true;
+    if (!input.n) buf_puts(out, "{}");
+    else if (json_is(input, '{') && json_valid(input)) buf_putspan(out, input);
+    else json_put_string(out, input);
 }
 
 static void put_block(json_buf *out, block *b)
@@ -703,10 +726,11 @@ static void put_block(json_buf *out, block *b)
     else if (b->kind == BLOCK_THINKING)
         json_printf(out, "{'type':'thinking','thinking':'%r','signature':'%r'}",
                     buf_cstr(&b->escaped_text), buf_cstr(&b->escaped_signature));
-    else if (b->kind == BLOCK_TOOL_USE)
-        json_printf(out, "{'type':'tool_use','id':%R,'name':%R,'input':%R}",
-                    json_get(start, "id"), json_get(start, "name"), tool_input(b));
-    else
+    else if (b->kind == BLOCK_TOOL_USE) {
+        json_printf(out, "{'type':'tool_use','id':%R,'name':%R,'input':", json_get(start, "id"), json_get(start, "name"));
+        put_tool_input(out, b);
+        buf_putc(out, '}');
+    } else
         buf_putspan(out, start);
 }
 
@@ -725,7 +749,6 @@ static void put_content(json_buf *out, outcome o)
 
 static int emit_result(outcome o)
 {
-    if (o != ABORTED && !tool_inputs_valid()) return emit_error("other", "model produced invalid tool input JSON");
     json_buf line = { 0 };
     json_printf(&line, "{'type':'result','stop':%s,'message':{'role':'assistant','content':", stop_name(o));
     put_content(&line, o);

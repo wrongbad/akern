@@ -70,8 +70,8 @@ sends `{"type":"abort","jobs":true}` first. On exit, remaining workers get
 
 | Signal | Effect |
 |---|---|
-| `SIGINT` | `abort` (jobs kept) |
-| second `SIGINT` within 1 s, `SIGTERM`, `SIGHUP` | shutdown: an open run ends `aborted` as by `abort`, its calls answered; a last message closes every pending call ([concurrency.md](concurrency.md#shutdown-and-end-of-input)); exit 130 |
+| `SIGINT` | `abort` (jobs kept), [interrupt](#interrupt) |
+| second `SIGINT` within 3 s, `SIGTERM`, `SIGHUP` | shutdown: an open run ends `aborted` as by `abort`, its calls answered; a last message closes every pending call ([concurrency.md](concurrency.md#shutdown-and-end-of-input)); exit 130 |
 
 | Status | When |
 |---|---|
@@ -307,7 +307,7 @@ Sent when a call begins, once per `tool_use` block.
 | `run`, `turn` | int | |
 | `call` | string | `tool_use` id |
 | `name` | string | tool name |
-| `input` | object | `{}` when missing |
+| `input` | object or string | `{}` when missing; a string when the model's input was not a JSON object (the call then fails) |
 
 ### tool_progress
 
@@ -346,6 +346,14 @@ Sent when a `now` item interrupts a streaming response ([concurrency.md](concurr
 | Field | Type | Meaning |
 |---|---|---|
 | `run`, `turn` | int | the interrupted turn |
+
+### interrupt
+
+Sent for each `SIGINT` that does not shut down, idle or not, before the events of the abort it starts ([§2](#exit)).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `quit_within` | int | seconds in which another `SIGINT` shuts down |
 
 ### run_end
 

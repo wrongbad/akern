@@ -1,6 +1,6 @@
 import json
 
-from conftest import shell, tool
+from conftest import parallel, shell, tool
 
 
 def test_a_prompt_gets_a_streamed_answer(kernel):
@@ -12,6 +12,16 @@ def test_a_prompt_gets_a_streamed_answer(kernel):
 def test_an_unknown_tool_gets_an_error_result_the_model_can_read(kernel):
     run = kernel(tool("bash", command="ls"))
     assert "Unknown tool: bash. The tools are exec, read and write." in run.result_text
+
+
+def test_a_call_whose_input_is_not_an_object_gets_an_error_result_and_the_turn_goes_on(kernel, home):
+    raw = '{"argv": sh, "argv": sh}'
+    run = kernel(parallel("@exec " + json.dumps(raw), shell("echo still ran")), env=home.env)
+    error, ran = run.tool_results
+    assert (error["is_error"], error["content"][0]["text"]) == (True, "input is not a JSON object: " + raw)
+    assert json.loads(ran["content"][0]["text"])["stdout"] == "still ran\n"
+    assert home.requests[1]["messages"][-1]["content"][0] == error
+    assert run.replies[-1] == "The tool said: input is not a JSON object: " + raw
 
 
 def test_parallel_exec_calls_answer_in_one_message(kernel):

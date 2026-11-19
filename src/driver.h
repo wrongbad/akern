@@ -2,9 +2,11 @@
    one model request in flight at a time. Owns when queued items are delivered, building each
    request and running the provider, appending its replies and the user messages that answer
    them, preemption, aborts, the run's outcome, and closing every pending call at shutdown.
-   Also owns the provider settings the set command changes: model, system prompt path and
-   params, which start from the config. Running tools is calls'; queueing is inbox's; storage
-   is session's.
+   Owns every append to the session and the ok that answers an append command, holding one
+   that names a parent until a turn boundary. Also owns the provider settings the set command
+   changes: model, system prompt path and params, which start from the config, and the
+   AKERN_MODEL children inherit. Running tools is calls'; queueing is inbox's; storage is
+   session's.
    run = from a delivery while idle to run_end; turn = one provider request and its reply;
    quiescent = idle, with nothing due and no job running. */
 
@@ -27,18 +29,21 @@ typedef struct driver {
     json_list       returned_contents;
     buf             answer_text;
     bool            last_run_failed;
-    size_t          inbox_items_before_wait;
+    struct held_entry *held;
+    size_t          nheld, capheld;
     char           *provider_model, *system_path;
     json_list       param_members;
     const config   *config;
-    struct sink    *events;
-    struct ctl     *ctl;
+    struct sink    *sink;
     struct calls   *calls;
     struct inbox   *inbox;
     struct procs   *procs;
     struct session *session;
 } driver;
 
+void driver_open(driver *d);
+void driver_set(driver *d, json model, json system_path, json params);
+bool driver_append(driver *d, const char *type, const char *parent_id, const json_list *members, json ref);
 bool driver_advance(driver *d);
 void driver_abort(driver *d, enum abort_jobs jobs);
 void driver_stop(driver *d);

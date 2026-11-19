@@ -1,5 +1,7 @@
 #!/bin/sh
 case "$1" in --help) echo 'usage: akern ["prompt text"] — start with the prompt, then send each line typed; Ctrl-D ends'; exit 0 ;; esac
 render="${AKERN_HOME:-$HOME/.akern}/render.jq"
-[ $# -gt 0 ] && set -- -- "$*"
-akern-loop "$@" | jq --unbuffered -rj -f "$render"
+prompted=false
+[ $# -gt 0 ] && set -- -- "$*" && prompted=true
+trap '' INT
+akern-loop "$@" | jq -n --unbuffered -rj --arg prompted $prompted -f "$render"

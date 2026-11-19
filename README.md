@@ -10,7 +10,7 @@ coding harness, reached by composition instead of by a plugin API: if you can
 write an executable in any language, you can extend it.
 
 ```sh
-echo "what does this repo do?" | akern-loop -m anthropic/claude-opus-5-5 | jq --unbuffered -rj -f build/render.jq
+echo "what does this repo do?" | akern-loop -m anthropic/claude-opus-5-5 | jq -n --unbuffered -rj -f build/render.jq
 ```
 
 No threads, no libraries. Parallel tool calls, background jobs, steering that
@@ -22,7 +22,7 @@ loop.
 First implementation of the whole design:
 
 - `src/`: the kernel, `akern-loop`
-- `providers/`: Anthropic and a scriptable mock
+- `providers/`: Anthropic, Claude Code (the `claude` CLI, on a subscription) and a scriptable mock
 - `tools/`: `akern`, the front end for people (an optional first prompt, then
   each line typed, which steers the agent while it works), and `akern-edit`,
   which people, scripts and the model run directly (the model reads and writes
@@ -30,7 +30,7 @@ First implementation of the whole design:
   `akern-loop -p "task"` run with `wait: false` and `stdin_open`, steered with
   `write` to its job
 - `skills/`: the `files` and `akern` skills, which `make` lists in `system.md`, the default system prompt
-- `render.jq`: how `akern "prompt"` shows the event stream; edit it to change the display
+- `tools/render.jq`: how `akern "prompt"` shows the event stream; edit it to change the display
 
 Like an OS kernel's core syscalls, the kernel gives the model `exec`, `read`
 and `write`, over files and jobs; everything else is a command and a

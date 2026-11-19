@@ -1,8 +1,8 @@
 /* calls: the model's tools, exec, read and write (protocols.md §5), and every tool call from
    its tool_use block to its answer. Owns the tool definitions sent to the provider, running
-   exec programs within --max-processes, keeping and spilling their output, writing to a job's
-   stdin, killing jobs, answering each call of the turn, and queueing a job's job_result in the
-   inbox when it ends. Reading and writing paths is files'; processes are proc's; when the turn
+   exec programs within --max-processes, keeping their output and spilling it to files in
+   <session>.d/calls, writing to a job's stdin, killing jobs, answering each call of the turn,
+   and queueing a job's job_result in the inbox when it ends. Reading and writing paths is files'; processes are proc's; when the turn
    is answered is the driver's.
    job = a call answered with tool_pending, or started with wait: false, named by its call id;
    the turn is settled when every waited call has finished and every other one has started. */
@@ -18,10 +18,9 @@ typedef struct calls {
     int             running_execs;
     json_buf        tool_schemas;
     const config   *config;
-    struct sink    *events;
+    struct sink    *sink;
     struct procs   *procs;
     struct inbox   *inbox;
-    struct session *session;
 } calls;
 
 json   calls_tool_schemas(calls *cs);

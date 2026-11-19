@@ -43,14 +43,16 @@ static void close_fd(int *fd)
 
 static void exec_child(const spawn_req *r, int stdin_fd, int stdout_fd, int stderr_fd)
 {
+    signal(SIGPIPE, SIG_DFL);
+    signal(SIGINT, SIG_IGN);
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGHUP, SIG_DFL);
+    signal(SIGCHLD, SIG_DFL);
+    setpgid(0, 0);
+    signal(SIGINT, SIG_DFL);
     sigset_t none;
     sigemptyset(&none);
     sigprocmask(SIG_SETMASK, &none, NULL);
-    signal(SIGPIPE, SIG_DFL);
-    signal(SIGINT, SIG_DFL);
-    signal(SIGTERM, SIG_DFL);
-    signal(SIGCHLD, SIG_DFL);
-    setpgid(0, 0);
 #ifdef __linux__
     prctl(PR_SET_PDEATHSIG, SIGTERM);
 #endif
@@ -71,9 +73,13 @@ worker *proc_spawn(procs *ps, const spawn_req *r)
     make_pipe(out);
     make_pipe(err);
 
+    sigset_t all, before;
+    sigfillset(&all);
+    sigprocmask(SIG_BLOCK, &all, &before);
     pid_t pid = fork();
-    if (pid < 0) die("fork: %s", strerror(errno));
     if (pid == 0) exec_child(r, in[0], out[1], err[1]);
+    sigprocmask(SIG_SETMASK, &before, NULL);
+    if (pid < 0) die("fork: %s", strerror(errno));
     setpgid(pid, pid);
 
     close(in[0]);

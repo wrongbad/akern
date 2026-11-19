@@ -1,35 +1,35 @@
 #include "calls.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "ctl.h"
 #include "files.h"
 #include "inbox.h"
-#include "loop.h"
 #include "msg.h"
 #include "proc.h"
-#include "session.h"
+#include "sink.h"
 
 static const char TOOL_SCHEMAS[] =
     "[{'name':'exec',"
     "'description':'Run a program. argv[0] is looked up on PATH and run directly, with no shell; "
-    "for pipes, redirects or scripts, run a shell yourself, e.g. [`sh`, `-c`, `...`]. stdin is "
-    "empty unless you pass text in stdin, which needs no quoting or escaping. The result is "
-    "JSON: {`stdout`, `stderr`, `exit`}, or `signal` instead of `exit` if the program was killed. "
+    "for pipes, redirects or scripts, run a shell yourself, e.g. argv [\\'sh\\', \\'-c\\', \\'...\\']. stdin is "
+    "empty unless you pass text in stdin, which needs no quoting or escaping. The result is a JSON "
+    "object with stdout, stderr and exit, or signal instead of exit if the program was killed. "
     "You get the result when the program finishes, unless a message arrives first: then it keeps "
-    "running and its result arrives later as a message. Set wait: false for a program you do not "
+    "running and its result arrives later as a message. Set wait to false for a program you do not "
     "need to wait for (a server, a watcher, a sub-agent you will steer). If the program writes an image or PDF "
     "to stdout, set stdout_type to its MIME type to receive it as an image or document instead of text. stdout is cut at "
     "stdout_limit bytes and stderr at stderr_limit bytes (default 100000 each); when one is longer, "
-    "all of it is saved to a file and the result adds `stdout_total` and `stdout_file` (or "
-    "`stderr_total` and `stderr_file`), so you can read the rest with tail, sed or grep, or rerun "
+    "all of it is saved to a file and the result adds stdout_total and stdout_file (or "
+    "stderr_total and stderr_file), so you can read the rest with tail, sed or grep, or rerun "
     "with a larger limit. To talk to a program while it runs (a REPL, a sub-agent), set "
     "stdin_open: its stdin stays open after any stdin text, and you send it more with write and the job named in the reply.',"
     "'input_schema':{'type':'object','properties':{"
@@ -54,7 +54,7 @@ static const char TOOL_SCHEMAS[] =
     "{'name':'write',"
     "'description':'Write text to a file, or to the stdin of a running program started with stdin_open. "
     "A file is replaced atomically, or added to with append; its directory must already exist. "
-    "For a job, content goes to its stdin; close: true then ends its input.',"
+    "For a job, content goes to its stdin; set close to end its input after it.',"
     "'input_schema':{'type':'object','properties':{"
     "'path':{'type':'string'},"
     "'job':{'type':'string'},"
@@ -63,7 +63,7 @@ static const char TOOL_SCHEMAS[] =
     "'close':{'type':'boolean'}},"
     "'required':['content']}}]";
 
-enum { DEFAULT_OUTPUT_LIMIT_BYTES = 100000 };
+enum { DEFAULT_OUTPUT_LIMIT_BYTES = 100000, MAX_SHOWN_INPUT_BYTES = 200 };
 static const double MAX_OUTPUT_LIMIT_BYTES = 1e12;
 
 static const char *const stream_names[NSTREAM] = { "stdout", "stderr" };
@@ -157,7 +157,7 @@ static void end_call(call *c, const char *end_status)
 {
     c->state = CALL_DONE;
     c->ended_at = monotonic_seconds();
-    event(c->calls->events, "{'type':'tool_end','run':%d,'call':%s,'is_error':%b,'status':%s}", c->run, c->id,
+    event(c->calls->sink, "{'type':'tool_end','run':%d,'call':%s,'is_error':%b,'status':%s}", c->run, c->id,
           c->is_error, end_status);
     if (c->delivers_late) queue_job_result(c);
     free_if_unreferenced(c);
@@ -178,7 +178,7 @@ static void cancel_call(call *c, const char *end_status, const char *text)
     }
     set_result_text(c, S(text), true);
     c->state = CALL_CANCELLED;
-    event(c->calls->events, "{'type':'tool_end','run':%d,'call':%s,'is_error':true,'status':%s}", c->run, c->id,
+    event(c->calls->sink, "{'type':'tool_end','run':%d,'call':%s,'is_error':true,'status':%s}", c->run, c->id,
           end_status);
     free_if_unreferenced(c);
 }
@@ -195,10 +195,24 @@ static void write_to_file(capture *k, span bytes)
     if (k->file_fd >= 0 && !write_all(k->file_fd, bytes)) stop_capture_to_file(k);
 }
 
-static void capture_to_file(capture *k, char *owned_path)
+static char *output_path(const call *c, enum stream s)
 {
-    k->file_path = owned_path;
-    k->file_fd = open(owned_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    buf path = { 0 };
+    buf_printf(&path, "%s.d", c->calls->config->session_path);
+    mkdir(path.p, 0755);
+    buf_puts(&path, "/calls");
+    mkdir(buf_cstr(&path), 0755);
+    buf_putc(&path, '/');
+    for (const char *p = c->id; *p; p++) buf_putc(&path, isalnum((unsigned char)*p) || *p == '-' ? *p : '_');
+    buf_printf(&path, ".%s", stream_exts[s]);
+    return path.p;
+}
+
+static void capture_to_file(call *c, enum stream s)
+{
+    capture *k = &c->output[s];
+    k->file_path = output_path(c, s);
+    k->file_fd = open(k->file_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (k->file_fd < 0) stop_capture_to_file(k);
     write_to_file(k, buf_span(&k->kept));
 }
@@ -207,7 +221,7 @@ static void capture_put(call *c, enum stream s, span bytes)
 {
     capture *k = &c->output[s];
     size_t room = k->limit_bytes > k->kept.n ? k->limit_bytes - k->kept.n : 0;
-    if (bytes.n > room && !k->file_path) capture_to_file(k, session_prepare_path(c->calls->session, "calls", c->id, stream_exts[s]));
+    if (bytes.n > room && !k->file_path) capture_to_file(c, s);
     write_to_file(k, bytes);
     buf_put(&k->kept, bytes.p, bytes.n < room ? bytes.n : room);
     k->total_bytes += bytes.n;
@@ -224,7 +238,7 @@ static void capture_all_to_files(call *c)
 {
     for (int s = 0; s < NSTREAM; s++)
         if (!c->output[s].file_path)
-            capture_to_file(&c->output[s], session_prepare_path(c->calls->session, "calls", c->id, stream_exts[s]));
+            capture_to_file(c, s);
 }
 
 static void add_pending_block(call *c, json_list *blocks)
@@ -312,7 +326,7 @@ static void on_exec_chunk(worker *w, enum stream s, span bytes)
     }
     capture_put(c, s, bytes);
     if (s == ERR)
-        event(c->calls->events, "{'type':'tool_progress','run':%d,'call':%s,'data':%S}", c->run, c->id, bytes);
+        event(c->calls->sink, "{'type':'tool_progress','run':%d,'call':%s,'data':%S}", c->run, c->id, bytes);
 }
 
 static void on_exec_exit(worker *w)
@@ -411,6 +425,21 @@ static void dispatch(call *c)
     }
 }
 
+static void fail_non_object_input(call *c)
+{
+    json input = buf_span(&c->input);
+    buf raw = { 0 }, text = { 0 };
+    if (!json_text(input, &raw)) buf_set(&raw, input);
+    size_t shown = raw.n < MAX_SHOWN_INPUT_BYTES ? raw.n : MAX_SHOWN_INPUT_BYTES;
+    while (shown < raw.n && ((unsigned char)raw.p[shown] & 0xC0) == 0x80) shown--;
+    buf_puts(&text, "input is not a JSON object: ");
+    buf_put(&text, raw.p, shown);
+    if (shown < raw.n) buf_puts(&text, "…");
+    fail_call(c, "done", buf_span(&text));
+    buf_free(&raw);
+    buf_free(&text);
+}
+
 static bool advance_call(call *c)
 {
     if (c->state == CALL_WAITING && c->calls->running_execs < c->calls->config->max_processes) spawn_exec(c);
@@ -439,7 +468,7 @@ static void start_call(calls *cs, json tool_use, int run, int turn)
     c->tool_name = json_text_dup(json_get(tool_use, "name"));
     if (!c->id) c->id = xstrdup("");
     if (!c->tool_name) c->tool_name = xstrdup("");
-    buf_set(&c->input, json_is(input, '{') ? input : S("{}"));
+    buf_set(&c->input, input.n ? input : S("{}"));
     c->run = run;
     c->turn = turn;
     c->output[OUT].file_fd = c->output[ERR].file_fd = -1;
@@ -448,9 +477,10 @@ static void start_call(calls *cs, json tool_use, int run, int turn)
     c->wait = !(wait.p && json_is(wait, 'f'));
     VEC_PUSH(cs->live, cs->nlive, cs->caplive, c);
     VEC_PUSH(cs->turn, cs->nturn, cs->capturn, c);
-    event(cs->events, "{'type':'tool_start','run':%d,'turn':%d,'call':%s,'name':%s,'input':%R}",
+    event(cs->sink, "{'type':'tool_start','run':%d,'turn':%d,'call':%s,'name':%s,'input':%R}",
           run, turn, c->id, c->tool_name, buf_span(&c->input));
-    dispatch(c);
+    if (json_is(buf_span(&c->input), '{')) dispatch(c);
+    else fail_non_object_input(c);
 }
 
 json calls_tool_schemas(calls *cs)
