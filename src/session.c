@@ -15,6 +15,7 @@ typedef struct entry {
     off_t  offset;
     size_t length;
     bool   is_message;
+    long   replacement;
 } entry;
 
 static uint64_t hash(const char *id)
@@ -60,7 +61,8 @@ static void index_line(session *s, json line, off_t offset)
 {
     json type = json_get(line, "type"), id = json_get(line, "id");
     if (offset == 0 || !json_is(id, '"')) return;
-    entry e = { .offset = offset, .length = line.n, .is_message = json_eq(type, "message") };
+    entry e = { .offset = offset, .length = line.n, .is_message = json_eq(type, "message"), .replacement = -1 };
+    char target_id[MAX_ID_CHARS + 1];
     copy_id(e.id, id);
     copy_id(e.parent_id, json_get(line, "parent"));
     if (!e.id[0]) return;
@@ -68,6 +70,9 @@ static void index_line(session *s, json line, off_t offset)
     grow_index(s);
     slot_put(s, s->nentries - 1);
     strcpy(s->head_id, e.id);
+    copy_id(target_id, json_get(line, "target"));
+    long target = json_eq(type, "replace") && json_is(json_get(line, "message"), '{') ? find_entry(s, target_id) : -1;
+    if (target >= 0) s->entries[target].replacement = (long)s->nentries - 1;
 }
 
 static void index_file(session *s)
@@ -170,28 +175,36 @@ const char *session_append(session *s, const char *type, const char *parent_id, 
     return s->failed ? NULL : s->head_id;
 }
 
-static void put_message_of(const session *s, json_buf *messages, const entry *e)
+static bool put_message_of(const session *s, json_buf *out, const char *separator, const entry *e)
 {
+    if (e->replacement >= 0) e = &s->entries[e->replacement];
     json_buf line = { 0 };
     line.p = xmalloc(e->length + 1);
     line.cap = e->length + 1;
     line.n = pread(s->fd, line.p, e->length, e->offset) == (ssize_t)e->length ? e->length : 0;
     json message = json_get(buf_span(&line), "message");
-    if (message.p) {
-        if (messages->n > 1) buf_putc(messages, ',');
-        buf_putspan(messages, message);
-    }
+    bool found = message.p;
+    if (found) buf_puts(out, separator), buf_putspan(out, message);
     buf_free(&line);
+    return found;
 }
 
-void session_context(const session *s, json_buf *messages)
+bool session_message(const session *s, const char *id, json_buf *message)
+{
+    long i = find_entry(s, id);
+    return i >= 0 && s->entries[i].is_message && put_message_of(s, message, "", &s->entries[i]);
+}
+
+void session_context(const session *s, json_buf *messages, strv *ids)
 {
     size_t *lineage = NULL, n = 0, cap = 0;
     size_t steps = 0;
     for (long i = find_entry(s, s->head_id); i >= 0 && steps++ < s->nentries; i = find_entry(s, s->entries[i].parent_id))
         if (s->entries[i].is_message) VEC_PUSH(lineage, n, cap, (size_t)i);
     buf_putc(messages, '[');
-    while (n--) put_message_of(s, messages, &s->entries[lineage[n]]);
+    while (n--)
+        if (put_message_of(s, messages, ids->n ? "," : "", &s->entries[lineage[n]]))
+            strv_push(ids, xstrdup(s->entries[lineage[n]].id));
     buf_putc(messages, ']');
     free(lineage);
 }

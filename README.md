@@ -1,59 +1,50 @@
 # akern
 
-An agent kernel: a minimal agent harness in C99. The kernel does one thing: it runs the
-model/tool loop, concurrently. Everything else — the model provider, every
-tool, every policy, every UI — is a separate program that speaks JSON lines
-over a pipe.
+An agent kernel: a minimal agent harness in C99. The kernel runs the
+model/tool loop, concurrently, and brokers the model's reads, writes and
+executions to the OS the way a Unix kernel or a GPU driver moves bytes: as
+opaque data it schedules and delivers but never interprets. Everything
+else — the model provider, every tool, every policy, every UI — is a separate
+program that speaks JSON lines over a pipe.
 
 The target is feature parity with the [pi](https://github.com/earendil-works/pi)
 coding harness, reached by composition instead of by a plugin API: if you can
-write an executable in any language, you can extend it.
+write an executable in any language, you can extend it. No threads, no
+libraries: parallel tool calls, background jobs, steering that can interrupt a
+turn, and sub-agents all come from processes and one `poll(2)` loop.
+
+## Quick start
 
 ```sh
-echo "what does this repo do?" | akern-loop -m anthropic/claude-opus-5-5 | jq -n --unbuffered -rj -f build/render.jq
-```
-
-No threads, no libraries. Parallel tool calls, background jobs, steering that
-can interrupt a turn, and sub-agents all come from processes and one `poll(2)`
-loop.
-
-## Status
-
-First implementation of the whole design:
-
-- `src/`: the kernel, `akern-loop`
-- `providers/`: Anthropic, Claude Code (the `claude` CLI, on a subscription) and a scriptable mock
-- `tools/`: `akern`, the front end for people (an optional first prompt, then
-  each line typed, which steers the agent while it works), and `akern-edit`,
-  which people, scripts and the model run directly (the model reads and writes
-  files with its `read` and `write` tools); a sub-agent is just
-  `akern-loop -p "task"` run with `wait: false` and `stdin_open`, steered with
-  `write` to its job
-- `skills/`: the `files` and `akern` skills, which `make` lists in `system.md`, the default system prompt
-- `tools/render.jq`: how `akern "prompt"` shows the event stream; edit it to change the display
-
-Like an OS kernel's core syscalls, the kernel gives the model `exec`, `read`
-and `write`, over files and jobs; everything else is a command and a
-`SKILL.md`. Not yet built: a richer line mode, the session commands (`fork`, `tree`,
-`compact`, `sessions`), `akern-pkg`.
-
-```sh
-make            # everything goes under build/, laid out as an AKERN_HOME
+make            # everything under build/, laid out as an AKERN_HOME
 make smoke      # scenario tests against the mock provider
 AKERN_MODEL=anthropic/claude-opus-5-5 ANTHROPIC_API_KEY=… ./akern.sh "what does this repo do?"
+echo "what does this repo do?" | AKERN_HOME=build build/bin/akern-loop -m anthropic/claude-opus-5-5 | build/render.jq
 ```
 
-Read the docs in order:
+`./akern.sh` runs `akern` with `AKERN_HOME=build` and `build/bin` first on
+`PATH`.
 
-| Doc | What it settles |
+| Target | Does |
 |---|---|
-| [docs/design.md](docs/design.md) | Goals, principles, architecture, what is and is not in the kernel |
-| [docs/protocols.md](docs/protocols.md) | The contracts: messages, session log, provider, tools, asking the user |
-| [docs/concurrency.md](docs/concurrency.md) | Calls, pending calls and jobs, the inbox, delivery modes, preemption, sub-agents, invariants |
-| [docs/akern-loop.md](docs/akern-loop.md) | Reference: environment, arguments, stdin commands, stdout events |
-| [docs/kernel.md](docs/kernel.md) | How the C kernel is built: worker table, driver, poll loop, testing concurrency |
-| [docs/pi-parity.md](docs/pi-parity.md) | Every pi feature mapped to the mechanism that provides it here |
-| [docs/roadmap.md](docs/roadmap.md) | Milestones and the open questions still to decide |
+| `make` | `build/bin/` (`akern-loop`, `akern-edit`, `akern`), `build/providers/`, `build/skills/`, `build/render.jq`, `build/system.md` |
+| `make smoke` | pytest in `build/venv` over `tests/`. After every test, `tests/invariants.py` checks each session and event log: every `tool_use` answered in the next message in call order, every `tool_pending` closed by one `job_result`, no `tool_use` in an aborted message, one provider stream at a time, every `tool_start` ended, `run_end.error` set exactly when the reason is `error`. `tests/bin/gate PATH` blocks until the test creates PATH, so a test decides when each call finishes |
+| `make asan` | the same tests against `build/asan/`, built with AddressSanitizer and UBSan; fails on any report (`build/asan/sanitizer.*`). The two trees share no objects, so switching needs no `make clean` |
+| `make lines` | counts the kernel's lines |
+| `make install` | [tools.md §3](docs/tools.md#install) |
+| `make clean` | removes `build/` |
 
-The protocols and concurrency docs are the real design. The kernel stays small
-because the contracts carry the weight; get those right and the C follows.
+Not yet built: a richer line mode, the session commands (`fork`, `tree`,
+`compact`, `sessions`), `akern-pkg`.
+
+## Docs
+
+| Doc | Covers |
+|---|---|
+| [docs/design.md](docs/design.md) | goals, principles, costs and security posture |
+| [docs/akern-loop.md](docs/akern-loop.md) | the kernel process: environment, arguments, stdin commands, stdout events, session files |
+| [docs/kernel.md](docs/kernel.md) | `src/`: each module's state and API, delivery modes, jobs, the dependency graph |
+| [docs/providers.md](docs/providers.md) | `providers/`: the request, the event stream, errors, the message schema; anthropic, claude-code, mock |
+| [docs/tools.md](docs/tools.md) | `tools/` and `skills/`: `exec`, `read`, `write`, programs on `PATH`, skills, the `akern` front end |
+| [docs/pi-parity.md](docs/pi-parity.md) | every pi feature mapped to the mechanism that provides it here |
+| [docs/roadmap.md](docs/roadmap.md) | remaining work and open questions |

@@ -1,10 +1,10 @@
-/* session: the session log (protocols.md §2), which this kernel alone appends to while it
+/* session: the session log (akern-loop.md §5), which this kernel alone appends to while it
    runs. Owns the ownership lease, appending entries of any type, the head, building the
    context, and whether an append has failed: from then on it appends nothing and an append
    returns NULL. What to append, and when, is decided by the driver; stopping when the log
    fails is the loop's.
    head = the last entry in the file; context = the messages on the parent chain from the head
-   back to a root. */
+   back to a root, each as its newest replace entry has it. */
 
 #ifndef SESSION_H
 #define SESSION_H
@@ -37,6 +37,7 @@ const char *session_head_id(const session *s);
 const char *session_append(session *s, const char *type, const char *parent_id, const json_list *members);
 bool        session_has_entry(const session *s, const char *id);
 bool        session_failed(const session *s);
-void        session_context(const session *s, json_buf *messages);
+bool        session_message(const session *s, const char *id, json_buf *message);
+void        session_context(const session *s, json_buf *messages, strv *ids);
 
 #endif

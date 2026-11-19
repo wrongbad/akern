@@ -238,6 +238,16 @@ static size_t utf8_len(const unsigned char *p, size_t n)
     return len;
 }
 
+span json_escaped_body(json string)
+{
+    return json_is(string, '"') && string.n >= 2 ? (span){ string.p + 1, string.n - 2 } : (span){ "", 0 };
+}
+
+void json_comma_unless_first(json_buf *array)
+{
+    if (array->n && array->p[array->n - 1] != '[') buf_putc(array, ',');
+}
+
 void json_put_string(buf *b, span text)
 {
     const unsigned char *p = (const unsigned char *)text.p, *e = p + text.n;

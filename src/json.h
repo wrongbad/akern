@@ -29,10 +29,12 @@ bool   json_text(json string, buf *text);
 char  *json_text_dup(json string);
 double json_num(json v, double fallback);
 bool   json_true(json v);
+span   json_escaped_body(json string);
 
 /* json_printf: ' writes "; %s C string and %S span as JSON strings or null; %R json or null; %r C string raw;
    %d int; %D long long; %f double; %b bool */
 void   json_put_string(buf *out, span text);
+void   json_comma_unless_first(json_buf *array);
 void   json_printf(buf *out, const char *fmt, ...);
 void   json_vprintf(buf *out, const char *fmt, va_list ap);
 

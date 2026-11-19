@@ -37,8 +37,9 @@ static bool read_media(FILE *f, const char *path, off_t size_bytes, const char *
     buf bytes = { 0 };
     json_list blocks = { 0 };
     char chunk[65536];
+    const char *slash = strrchr(path, '/');
     for (size_t n; (n = fread(chunk, 1, sizeof chunk, f)) > 0;) buf_put(&bytes, chunk, n);
-    blocks_add_media(&blocks, media_type, buf_span(&bytes));
+    blocks_add_media(&blocks, media_type, slash ? slash + 1 : path, buf_span(&bytes));
     json_printf(result, "[%R]", buf_span(&blocks));
     buf_free(&bytes);
     buf_free(&blocks);

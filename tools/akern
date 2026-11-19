@@ -4,4 +4,4 @@ render="${AKERN_HOME:-$HOME/.akern}/render.jq"
 prompted=false
 [ $# -gt 0 ] && set -- -- "$*" && prompted=true
 trap '' INT
-akern-loop "$@" | jq -n --unbuffered -rj --arg prompted $prompted -f "$render"
+akern-loop "$@" | "$render" --arg prompted $prompted

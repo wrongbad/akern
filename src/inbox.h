@@ -4,7 +4,7 @@
    giving undelivered prompts back when a run is aborted.
    When a delivery happens, and writing it to the session, are the driver's.
    delivery mode (enum when) = the point at which a queued item may enter the conversation
-   (concurrency.md), named by ctl's commands and used by the driver. */
+   (kernel.md), named by ctl's commands and used by the driver. */
 
 #ifndef INBOX_H
 #define INBOX_H

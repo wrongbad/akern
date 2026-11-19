@@ -14,6 +14,9 @@ KERNEL     = $(patsubst %,$(OBJ)/src/%.o,main loop driver calls files inbox proc
 SHARED     = $(OBJ)/src/json.o $(OBJ)/src/base.o
 FILE_TOOLS = $(BIN)/akern-edit
 PROVIDERS  = $(patsubst providers/%.c,$(ROOT)/providers/%,$(wildcard providers/*.c))
+PROTOCOL   = $(OBJ)/providers/lib/provider.o $(SHARED)
+MESSAGES   = $(OBJ)/providers/lib/messages.o $(OBJ)/providers/lib/media.o $(PROTOCOL)
+HTTP       = $(OBJ)/providers/lib/http.o $(PROTOCOL)
 SCRIPTS    = $(patsubst tools/%,$(BIN)/%,$(filter-out %.c,$(wildcard tools/akern tools/akern-*)))
 DATA       = $(patsubst %,$(ROOT)/%,render.jq $(wildcard skills/*/*))
 PROGRAMS   = $(BIN)/akern-loop $(FILE_TOOLS)
@@ -37,14 +40,19 @@ $(BIN)/akern-loop: $(KERNEL)
 $(FILE_TOOLS): $(BIN)/%: $(OBJ)/tools/%.o
 	$(LINK) $^
 
-$(ROOT)/providers/mock: $(OBJ)/providers/mock.o $(SHARED)
+$(ROOT)/providers/mock: $(OBJ)/providers/mock.o $(PROTOCOL)
 	$(LINK) $^
 
-$(ROOT)/providers/anthropic: $(OBJ)/providers/anthropic.o $(SHARED)
+$(ROOT)/providers/anthropic: $(OBJ)/providers/anthropic.o $(MESSAGES) $(HTTP)
 	$(LINK) $^ -lcurl
 
-$(ROOT)/providers/claude-code: $(OBJ)/providers/claude-code.o $(SHARED)
+$(ROOT)/providers/claude-code: $(OBJ)/providers/claude-code.o $(MESSAGES)
 	$(LINK) $^
+
+$(ROOT)/providers/openai: $(OBJ)/providers/openai.o $(OBJ)/providers/lib/media.o $(HTTP)
+	$(LINK) $^ -lcurl
+
+$(patsubst %.c,$(OBJ)/%.o,$(wildcard providers/*.c providers/lib/*.c)): $(wildcard providers/lib/*.h)
 
 $(OBJ)/%.o: %.c src/*.h
 	@mkdir -p $(@D)

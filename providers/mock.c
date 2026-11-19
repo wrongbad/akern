@@ -1,49 +1,29 @@
-#include <signal.h>
+#include "lib/provider.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
-#include "json.h"
-
 enum { DELTA_BYTES = 8, MAX_ECHOED_RESULT_BYTES = 400 };
 static const double PAUSE_TICK_SECONDS = 0.01, FILE_POLL_SECONDS = 0.02;
 
-static volatile sig_atomic_t terminated;
 static buf streamed_text;
-
-static void on_term(int sig)
-{
-    (void)sig;
-    terminated = 1;
-}
-
-static void emit(const char *fmt, ...)
-{
-    json_buf line = { 0 };
-    va_list ap;
-    va_start(ap, fmt);
-    json_vprintf(&line, fmt, ap);
-    va_end(ap);
-    printf("%s\n", buf_cstr(&line));
-    fflush(stdout);
-    buf_free(&line);
-}
 
 static void finish_aborted(void)
 {
     if (streamed_text.n)
-        emit("{'type':'result','stop':'aborted','message':{'role':'assistant','content':[{'type':'text','text':%S}]}}",
+        provider_emit("{'type':'result','stop':'aborted','message':{'role':'assistant','content':[{'type':'text','text':%S}]}}",
              buf_span(&streamed_text));
-    else emit("{'type':'result','stop':'aborted','message':{'role':'assistant','content':[]}}");
+    else provider_emit("{'type':'result','stop':'aborted','message':{'role':'assistant','content':[]}}");
     exit(0);
 }
 
 static void pause_for(double seconds)
 {
     for (double t = 0; t < seconds; t += PAUSE_TICK_SECONDS) {
-        if (terminated) finish_aborted();
+        if (provider_aborted()) finish_aborted();
         nanosleep(&(struct timespec){ 0, (long)(PAUSE_TICK_SECONDS * 1e9) }, NULL);
     }
 }
@@ -90,7 +70,7 @@ static void stream_text(span text)
 {
     for (size_t i = 0; i < text.n; i += DELTA_BYTES) {
         span piece = { text.p + i, text.n - i < DELTA_BYTES ? text.n - i : DELTA_BYTES };
-        emit("{'type':'text_delta','text':%S}", piece);
+        provider_emit("{'type':'text_delta','text':%S}", piece);
         buf_putspan(&streamed_text, piece);
     }
 }
@@ -114,7 +94,7 @@ static void echo_turn(json messages)
                      (int)getpid(), ++n, cmd);
             }
         }
-        emit("{'type':'result','stop':'tool_use','message':{'role':'assistant','content':[%r]},"
+        provider_emit("{'type':'result','stop':'tool_use','message':{'role':'assistant','content':[%r]},"
              "'usage':{'input':1,'output':1,'cache_read':0,'cache_write':0}}", buf_cstr(&blocks));
         return;
     }
@@ -123,17 +103,14 @@ static void echo_turn(json messages)
     else buf_printf(&reply, "echo: %s", buf_cstr(&text));
     if (text.n && result_text.n) buf_printf(&reply, " (and you said: %s)", text.p);
     stream_text(buf_span(&reply));
-    emit("{'type':'result','stop':'end_turn','message':{'role':'assistant','content':[{'type':'text','text':%S}]},"
+    provider_emit("{'type':'result','stop':'end_turn','message':{'role':'assistant','content':[{'type':'text','text':%S}]},"
          "'usage':{'input':1,'output':1,'cache_read':0,'cache_write':0}}", buf_span(&reply));
 }
 
 static void scripted_turn(const char *path, int turn)
 {
     FILE *f = fopen(path, "r");
-    if (!f) {
-        emit("{'type':'error','kind':'other','message':'cannot open MOCK_SCRIPT'}");
-        exit(1);
-    }
+    if (!f) provider_error("other", "cannot open MOCK_SCRIPT", 0);
     buf script = read_all(f);
     fclose(f);
     int script_turn = 0;
@@ -154,18 +131,16 @@ static void scripted_turn(const char *path, int turn)
         }
         script_turn += is_result;
     }
-    emit("{'type':'result','stop':'end_turn','message':{'role':'assistant','content':[{'type':'text','text':'(script exhausted)'}]}}");
+    provider_emit("{'type':'result','stop':'end_turn','message':{'role':'assistant','content':[{'type':'text','text':'(script exhausted)'}]}}");
 }
 
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--models") == 0) {
-        puts("{\"id\":\"echo\",\"context\":1000000,\"max_output\":1000}");
+        provider_model("echo", 1000000, 1000);
         return 0;
     }
-    signal(SIGTERM, on_term);
-    json_buf request = read_all(stdin);
-    json messages = json_get(buf_span(&request), "messages");
+    json messages = json_get(provider_request(), "messages");
     const char *script = getenv("MOCK_SCRIPT");
     if (script && *script) scripted_turn(script, count_role(messages, "assistant"));
     else echo_turn(messages);

@@ -30,16 +30,23 @@ IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png"
 
 @pytest.fixture(scope="module")
 def api():
-    bodies, streams = [], [STREAM]
+    seen, replies = [], []
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            bodies.append(self.rfile.read(int(self.headers["content-length"])))
-            self.send_response(200)
-            self.send_header("content-type", "text/event-stream")
-            self.send_header("content-length", str(len(streams[-1])))
+        def answer(self, request_body):
+            seen.append((self.path, dict(self.headers), request_body))
+            status, body = replies.pop(0) if replies else (200, STREAM)
+            self.send_response(status)
+            self.send_header("content-type", "text/event-stream" if status == 200 else "application/json")
+            self.send_header("content-length", str(len(body)))
             self.end_headers()
-            self.wfile.write(streams[-1])
+            self.wfile.write(body)
+
+        def do_POST(self):
+            self.answer(self.rfile.read(int(self.headers["content-length"])))
+
+        def do_GET(self):
+            self.answer(b"")
 
         def log_message(self, *args):
             pass
@@ -49,15 +56,23 @@ def api():
     env = {**os.environ, "ANTHROPIC_API_KEY": "test", "NO_PROXY": "*", "no_proxy": "*",
            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_address[1]}"}
 
-    def send(messages, stream=STREAM):
-        streams.append(stream)
-        request = {"model": "claude-opus-5-5", "system": "", "messages": messages, "tools": [], "params": {}}
-        done = subprocess.run([PROVIDER], input=json.dumps(request), env=env, capture_output=True, text=True, timeout=30)
-        assert done.returncode == 0, done.stdout + done.stderr
-        result = json.loads(done.stdout.splitlines()[-1])
-        assert result["type"] == "result"
-        return bodies[-1], result
+    def run(messages, *answers, params=None, args=()):
+        seen.clear()
+        replies[:] = [a if isinstance(a, tuple) else (200, a) for a in answers]
+        request = {"model": "claude-opus-5-5", "system": "", "messages": [], "tools": [], "params": params or {}}
+        raw = messages if isinstance(messages, str) else json.dumps(messages)
+        stdin = json.dumps(request).replace('"messages": []', '"messages": ' + raw)
+        done = subprocess.run([PROVIDER, *args], input=stdin, env=env, capture_output=True, text=True, timeout=30)
+        return done.returncode, [json.loads(line) for line in done.stdout.splitlines()], seen[:]
 
+    def send(messages, stream=STREAM, params=None):
+        code, lines, requests = run(messages, stream, params=params)
+        assert code == 0, lines
+        assert lines[-1]["type"] == "result"
+        return requests[-1][2], lines[-1]
+
+    send.run, send.seen, send.replies = run, seen, replies
+    send.env = {k: env[k] for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "NO_PROXY", "no_proxy")}
     yield send
     server.shutdown()
 
@@ -168,11 +183,101 @@ def test_an_image_in_a_late_result_is_still_held_to_the_api_limits(api):
     assert blocks[1] == text("[image omitted: larger than the API's 10 MB limit. The original is still in the session.]")
 
 
-def test_a_media_type_the_api_does_not_accept_is_replaced_by_a_note(api):
-    heic = {"type": "image", "source": {"type": "base64", "media_type": "image/heic", "data": "AAAA"}}
-    [message] = sent(api, [user(text("look"), heic)])
-    assert message["content"][1] == text(
-        "[image omitted: image/heic is not a type the API accepts. The original is still in the session.]")
+def rejected(api, messages, message, status=400, type="invalid_request_error"):
+    code, lines, requests = api.run(messages, (status, json.dumps({"type": "error", "error": {"type": type, "message": message}}).encode()))
+    assert code == 1 and len(requests) == 1
+    return lines[-1]
+
+
+NESTED = [user(text("a")), user(text("b"), IMAGE), calls("tu_1"),
+          user(dict(result("tu_1", "see"), content=[text("see"), IMAGE]))]
+
+
+@pytest.mark.parametrize("messages,position,at", [
+    (SESSION, "messages.4.content.2.image.source.base64.data", {"message": 4, "block": 0, "inner": 1}),
+    (NESTED, "messages.0.content.2.image.source.base64", {"message": 1, "block": 1}),
+    (NESTED, "messages.2.content.0.content.1.image.source.base64", {"message": 3, "block": 0, "inner": 1}),
+    (NESTED, "messages.2.content.0.tool_result.content.1.image.source.base64", {"message": 3, "block": 0, "inner": 1}),
+])
+def test_an_error_naming_a_media_block_names_it_in_the_request_the_kernel_sent(api, messages, position, at):
+    assert rejected(api, messages, f"{position}: image exceeds 5 MB maximum") == {
+        "type": "error", "kind": "invalid_block", "message": "image exceeds 5 MB maximum", "status": 400, "at": at}
+
+
+@pytest.mark.parametrize("message", [
+    "messages.1.content.0: Invalid `signature` in `thinking` block.",
+    "messages.0.content.0.text: field required",
+    "image exceeds 5 MB maximum",
+])
+def test_an_error_naming_no_media_block_is_an_ordinary_invalid_request(api, message):
+    assert rejected(api, NESTED, message) == {"type": "error", "kind": "invalid_request", "message": message, "status": 400}
+
+
+def test_through_the_kernel_a_rejected_image_is_replaced_and_the_run_goes_on(api, kernel):
+    error = {"type": "error", "error": {"type": "invalid_request_error",
+             "message": "messages.0.content.1.image.source.base64.data: image dimensions exceed max allowed size: 8000 pixels"}}
+    api.seen.clear()
+    api.replies[:] = [(400, json.dumps(error).encode())]
+    look = json.dumps({"type": "send", "content": [text("look"), IMAGE]})
+    run = kernel(look, "-m", "anthropic/claude-opus-5-5", env=api.env)
+    [replaced] = run.entries_of("replace")
+    note = text("[image omitted: image dimensions exceed max allowed size: 8000 pixels]")
+    assert replaced["message"] == user(text("look"), note)
+    assert json.loads(api.seen[-1][2])["messages"] == [user(text("look"), note)]
+    assert (run.replies, run.events_of("run_end")[0]["reason"]) == (["ok"], "done")
+
+
+def test_extension_blocks_and_fields_are_not_sent(api):
+    reply = {"role": "assistant", "content": [
+        {"type": "x-openai", "item": {"type": "reasoning"}}, {"type": "text", "text": "Checking.", "x-openai-phase": "commentary"},
+        {"type": "tool_use", "id": "tu_1", "name": "exec", "input": {}, "x-note": 1}]}
+    messages = sent(api, [user(text("go"), {"type": "x-mark"}), reply, user(result("tu_1", "done"))])
+    assert messages[:2] == [user(text("go")), {"role": "assistant", "content": [
+        text("Checking."), {"type": "tool_use", "id": "tu_1", "name": "exec", "input": {}}]}]
+
+
+def test_without_extensions_a_message_is_sent_byte_for_byte(api):
+    messages = ('[{"role":"user","content":[{"type": "text",  "text":"go"}]},'
+                '{"role":"assistant","content":[{"type":"text", "text":"a","citations":null} ,{"type":"thinking","thinking":"","signature":"s"}]},'
+                '{"role":"user","content":"next"}]')
+    body, _ = api(messages)
+    assert (b'"messages":[{"role":"user","content":[{"type": "text",  "text":"go"}]},{"role":"assistant","content":['
+            b'{"type":"text", "text":"a","citations":null},{"type":"thinking","thinking":"","signature":"s"}]},') in body
+
+
+def test_a_document_name_is_sent_as_its_title_and_unnamed_media_byte_for_byte(api):
+    pdf = '{"type":"document", "source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}}'
+    named = '{"type":"document","name":"report.pdf","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}}'
+    titled = '{"type":"document","title":"report.pdf","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}}'
+    use = '{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"read","input":{}}]}'
+    result = '{"type":"tool_result","tool_use_id":"tu_1","name":"read","is_error":false,"content":[%s, %s]}'
+    body, _ = api(f'[{{"role":"user","content":[{named},{pdf}]}},{use},{{"role":"user","content":[{result % (pdf, pdf)}]}},'
+                  f'{use},{{"role":"user","content":[{result % (named, pdf)}]}}]')
+    assert f'{{"role":"user","content":[{titled},{pdf}]}}'.encode() in body
+    assert f'"content":[{pdf}, {pdf}]}}'.encode() in body
+    assert f'"is_error":false,"content":[{titled},{pdf}]}}'.encode() in body
+
+
+def test_thinking_effort_and_fallbacks_are_on_unless_params_turn_them_off(api):
+    body = json.loads(api([user(text("go"))])[0])
+    assert (body["max_tokens"], body["thinking"], body["output_config"], body["fallbacks"]) == (
+        64000, {"type": "adaptive", "display": "summarized"}, {"effort": "high"}, "default")
+    body = json.loads(api([user(text("go"))], params={"thinking": "off", "effort": "off", "fallbacks": "off", "max_tokens": 500000})[0])
+    assert body["max_tokens"] == 500000
+    assert not {"thinking", "output_config", "fallbacks"} & body.keys()
+    body = json.loads(api([user(text("go"))], params={"thinking": {"type": "enabled", "budget_tokens": 900}, "effort": "off"})[0])
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 900}
+
+
+def test_models_are_the_ones_the_api_lists_page_by_page(api):
+    first = {"data": [{"type": "model", "id": "claude-opus-5-5", "max_input_tokens": 1000000, "max_tokens": 128000}],
+             "has_more": True, "last_id": "claude-opus-5-5"}
+    second = {"data": [{"type": "model", "id": "claude-haiku-4-5", "max_input_tokens": None}], "has_more": False, "last_id": "claude-haiku-4-5"}
+    code, lines, requests = api.run([], (200, json.dumps(first).encode()), (200, json.dumps(second).encode()), args=["--models"])
+    assert code == 0
+    assert [r[0] for r in requests] == ["/v1/models?limit=1000", "/v1/models?limit=1000&after_id=claude-opus-5-5"]
+    assert requests[0][1]["x-api-key"] == "test"
+    assert lines == [{"id": "claude-opus-5-5", "context": 1000000, "max_output": 128000}, {"id": "claude-haiku-4-5"}]
 
 
 def test_unparsable_tool_input_from_the_model_comes_back_as_a_string_in_the_tool_use(api):

@@ -36,9 +36,9 @@ def event_violations(events):
     if unfinished := [c for c in started if c not in finished]:
         found.append(f"tool_start without tool_end or a result: {unfinished}")
     streams = [e["type"] for e in events
-               if e["type"] in ("turn_start", "run_end") or e["type"] == "message" and e.get("source") == "assistant"]
+               if e["type"] in ("turn_start", "run_end", "replace") or e["type"] == "message" and e.get("source") == "assistant"]
     if any(a == b == "turn_start" for a, b in zip(streams, streams[1:])):
-        found.append("two provider streams open at once (turn_start twice without an assistant message or run_end between)")
+        found.append("two provider streams open at once (turn_start twice without an assistant message, replace or run_end between)")
     if disagreeing := [e["run"] for e in events
                        if e["type"] == "run_end" and (e["reason"] == "error") != (e["error"] is not None)]:
         found.append(f"run_end with an error but no error reason, or the reverse, in runs {disagreeing}")

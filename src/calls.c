@@ -276,7 +276,7 @@ static void set_media_result(call *c, json media_type)
     json_list blocks = { 0 };
     json_buf info = { 0 };
     char *type = json_text_dup(media_type);
-    blocks_add_media(&blocks, type, buf_span(&c->output[OUT].kept));
+    blocks_add_media(&blocks, type, NULL, buf_span(&c->output[OUT].kept));
     free(type);
     json_printf(&info, "{'stderr':%S,", text_or_empty(&c->output[ERR].kept));
     put_exit_members(c, &info);

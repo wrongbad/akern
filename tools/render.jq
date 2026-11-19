@@ -1,3 +1,4 @@
+#!/usr/bin/env -S jq -nj --unbuffered -f
 def dim: "\u001b[2m\(.)\u001b[0m";
 def blocks($t): [select(.type == "message") | .message.content[]? | select(.type? == $t) | .tool_use_id];
 def running: "\(.) job\(if . == 1 then "" else "s" end) running";

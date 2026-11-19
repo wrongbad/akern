@@ -53,6 +53,19 @@ def test_read_returns_a_file_as_the_media_type_the_call_names(kernel, tmp_path):
     assert image["source"] == {"type": "base64", "media_type": "image/png", "data": base64.b64encode(TINY_PNG).decode()}
 
 
+def test_read_names_a_document_after_the_file(kernel, tmp_path):
+    pdf = tmp_path / "report.pdf"
+    pdf.write_bytes(b"%PDF-")
+    run = kernel(tool("read", path=str(pdf), type="application/pdf"))
+    assert run.tool_results[0]["content"][0] == {"type": "document", "name": "report.pdf", "source": {
+        "type": "base64", "media_type": "application/pdf", "data": base64.b64encode(b"%PDF-").decode()}}
+
+
+def test_stdout_type_output_has_no_name(kernel):
+    run = kernel(tool("exec", argv=["printf", "%s", "%PDF-"], stdout_type="application/pdf"))
+    assert "name" not in run.tool_results[0]["content"][0]
+
+
 def test_read_without_a_type_refuses_a_binary_file(kernel, tmp_path):
     png = tmp_path / "tiny.png"
     png.write_bytes(TINY_PNG)

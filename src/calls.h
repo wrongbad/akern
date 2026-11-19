@@ -1,4 +1,4 @@
-/* calls: the model's tools, exec, read and write (protocols.md §5), and every tool call from
+/* calls: the model's tools, exec, read and write (tools.md §1), and every tool call from
    its tool_use block to its answer. Owns the tool definitions sent to the provider, running
    exec programs within --max-processes, keeping their output and spilling it to files in
    <session>.d/calls, writing to a job's stdin, killing jobs, answering each call of the turn,

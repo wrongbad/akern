@@ -1,7 +1,9 @@
-/* driver: the conversation state machine (kernel.md, concurrency.md): runs and turns, with
+/* driver: the conversation state machine (kernel.md): runs and turns, with
    one model request in flight at a time. Owns when queued items are delivered, building each
    request and running the provider, appending its replies and the user messages that answer
    them, preemption, aborts, the run's outcome, and closing every pending call at shutdown.
+   When the provider names a request block the API rejected, appends a replace entry that swaps
+   it for a note and sends the request again, a few times at most.
    Owns every append to the session and the ok that answers an append command, holding one
    that names a parent until a turn boundary. Also owns the provider settings the set command
    changes: model, system prompt path and params, which start from the config, and the
@@ -26,6 +28,8 @@ typedef struct driver {
     struct worker  *provider;
     bool            provider_exited;
     json_buf        provider_result, stripped_message, error;
+    strv            context_ids;
+    int             block_retries;
     json_list       returned_contents;
     buf             answer_text;
     bool            last_run_failed;

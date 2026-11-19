@@ -19,6 +19,8 @@ enum assistant_end { REPLY_COMPLETE, REPLY_ABORTED };
 
 static const unsigned WHEN_ANY = WHEN_NOW | WHEN_TURN | WHEN_IDLE;
 
+enum { MAX_BLOCK_RETRIES = 8 };
+
 typedef struct held_entry {
     char     *type, *parent_id;
     json_list members;
@@ -63,6 +65,7 @@ static void start_run(driver *d)
 {
     d->run++;
     d->turn = 0;
+    d->block_retries = 0;
     d->error.n = d->answer_text.n = 0;
     event(d->sink, "{'type':'run_start','run':%d}", d->run);
 }
@@ -118,7 +121,8 @@ static void build_request(driver *d, json_buf *request)
 {
     json_buf messages = { 0 };
     char *system = read_file(d->system_path);
-    session_context(d->session, &messages);
+    strv_free(&d->context_ids);
+    session_context(d->session, &messages, &d->context_ids);
     json_printf(request, "{'model':%s,'system':%s,'messages':%R,'tools':%R,'params':{%r}}",
                 model_id(d), system, buf_span(&messages), calls_tool_schemas(d->calls),
                 buf_cstr(&d->param_members));
@@ -249,14 +253,48 @@ static bool idle(driver *d)
     return true;
 }
 
+static bool omit_invalid_block(driver *d)
+{
+    json error = buf_span(&d->error), at = json_get(error, "at");
+    double index = json_num(json_get(at, "message"), -1);
+    if (!json_eq(json_get(error, "kind"), "invalid_block") || d->block_retries >= MAX_BLOCK_RETRIES
+        || index < 0 || index >= (double)d->context_ids.n)
+        return false;
+    const char *target = d->context_ids.v[(size_t)index];
+    json_buf message = { 0 }, omitted = { 0 };
+    buf reason = { 0 };
+    json_text(json_get(error, "message"), &reason);
+    bool found = session_message(d->session, target, &message)
+              && message_omit_media(buf_span(&message), (long)json_num(json_get(at, "block"), -1),
+                                    (long)json_num(json_get(at, "inner"), -1), buf_span(&reason), &omitted);
+    if (found) {
+        json_list members = { 0 };
+        json_printf(&members, "'target':%s,'message':%R", target, buf_span(&omitted));
+        const char *id = session_append(d->session, "replace", AT_HEAD, &members);
+        event(d->sink, "{'type':'replace','run':%d,'id':%s,'target':%s,'message':%R}",
+              d->run, id, target, buf_span(&omitted));
+        d->block_retries++;
+        buf_free(&members);
+    }
+    buf_free(&message);
+    buf_free(&omitted);
+    buf_free(&reason);
+    return found;
+}
+
 static bool streamed(driver *d)
 {
     d->provider_exited = false;
+    if (!d->provider_result.n && omit_invalid_block(d)) {
+        begin_turn(d);
+        return true;
+    }
     if (!d->provider_result.n) {
         if (!d->error.n) report_error(d, "provider", S("provider exited without a result"));
         return settle(d, "error");
     }
     d->error.n = 0;
+    d->block_retries = 0;
     json message = append_assistant_message(d, REPLY_COMPLETE);
     bool wants_tools = json_eq(json_get(buf_span(&d->provider_result), "stop"), "tool_use");
     if (wants_tools && calls_start(d->calls, message, d->run, d->turn)) {

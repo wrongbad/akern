@@ -44,11 +44,13 @@ static void put_base64(buf *out, span bytes)
     }
 }
 
-void blocks_add_media(json_list *blocks, const char *media_type, span bytes)
+void blocks_add_media(json_list *blocks, const char *media_type, const char *name, span bytes)
 {
+    bool image = strncmp(media_type, "image/", 6) == 0;
     comma(blocks);
-    json_printf(blocks, "{'type':%s,'source':{'type':'base64','media_type':%s,'data':'",
-                strncmp(media_type, "image/", 6) == 0 ? "image" : "document", media_type);
+    json_printf(blocks, "{'type':%s,", image ? "image" : "document");
+    if (name && !image) json_printf(blocks, "'name':%s,", name);
+    json_printf(blocks, "'source':{'type':'base64','media_type':%s,'data':'", media_type);
     put_base64(blocks, bytes);
     buf_puts(blocks, "\"}}");
 }
@@ -111,4 +113,55 @@ bool message_empty(json message)
     json block;
     jiter it = json_iter(json_get(message, "content"));
     return !json_next(&it, NULL, &block);
+}
+
+static bool put_without_media(json_buf *out, json object, const long *path, span reason);
+
+static bool put_note(json_buf *out, json block, span reason)
+{
+    json type = json_get(block, "type");
+    bool image = json_eq(type, "image");
+    if (!image && !json_eq(type, "document")) return false;
+    buf note = { 0 };
+    buf_printf(&note, "[%s omitted: %.*s]", image ? "image" : "document", (int)reason.n, reason.p);
+    json_printf(out, "{'type':'text','text':%S}", buf_span(&note));
+    buf_free(&note);
+    return true;
+}
+
+static bool put_content_without_media(json_buf *out, json content, const long *path, span reason)
+{
+    jiter it = json_iter(content);
+    bool omitted = false;
+    buf_putc(out, '[');
+    for (long i = 0; json_next(&it, NULL, &content); i++) {
+        size_t at = out->n + (i > 0);
+        if (i) buf_putc(out, ',');
+        bool here = i == path[0]
+                 && (path[1] < 0 ? put_note(out, content, reason) : put_without_media(out, content, path + 1, reason));
+        if (!here) out->n = at, buf_putspan(out, content);
+        omitted |= here;
+    }
+    buf_putc(out, ']');
+    return omitted;
+}
+
+static bool put_without_media(json_buf *out, json object, const long *path, span reason)
+{
+    jiter it = json_iter(object);
+    bool omitted = false, first = true;
+    buf_putc(out, '{');
+    for (json k, v; json_next(&it, &k, &v); first = false) {
+        json_printf(out, "%r%R:", first ? "" : ",", k);
+        if (json_eq(k, "content") && json_is(v, '[')) omitted |= put_content_without_media(out, v, path, reason);
+        else buf_putspan(out, v);
+    }
+    buf_putc(out, '}');
+    return omitted;
+}
+
+bool message_omit_media(json message, long block, long inner, span reason, json_buf *out)
+{
+    long path[] = { block, inner, -1 };
+    return block >= 0 && put_without_media(out, message, path, reason);
 }
