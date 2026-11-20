@@ -112,7 +112,8 @@ and messages that interrupt a turn are part of the kernel from the start.
     directory or executable: [akern.md](akern.md) for the kernel
     process, [kernel.md](kernel.md) for `src/`, [providers.md](providers.md)
     for `providers/`, [tools.md](tools.md) for `tools/` and `skills/`. Every
-    fact lives in one place; other docs link to it.
+    fact lives in one place; other docs link to it. A walkthrough such as
+    [turn.md](turn.md) orders those facts and links to them.
 17. **Providers keep no model tables.** A provider sends the model id as
     given and compiles in no list of models, limits or features: `--models`
     asks the API, and what a model refuses comes back as the API's error. A

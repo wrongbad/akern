@@ -36,7 +36,7 @@ One JSON object on stdin:
 | Field | Value |
 |---|---|
 | `model` | string; the part of `provider/model` after the `/` |
-| `system` | the system prompt file's contents, read for every request; `null` when it cannot be read |
+| `system` | the system prompt: fixed when `akern` starts, or by a `set` command ([akern.md](akern.md#system-prompt)); `null` when empty |
 | `messages` | the context: the `message` of each `message` entry from the session's head back to a root, oldest first ([akern.md §5](akern.md#session-file)); shape in §5 |
 | `tools` | the built-in tool definitions, `{name, description, input_schema}` ([tools.md §1](tools.md#1-built-in-tools)) |
 | `params` | object from `-P` and `set`; the provider defines its keys and ignores the rest |
@@ -361,9 +361,9 @@ text block, and the first text of its first `tool_result` or `job_result`):
 | starts with `!` | one assistant message of calls, `stop: tool_use`. The rest is split on `;`; a part `@NAME JSON` is a `tool_use` of `NAME` with that input (`{}` when empty), any other part `exec` with `["sh","-c",PART]`. Ids are `tu_<pid>_<n>` |
 | anything else | streamed as 8-byte `text_delta`s, `stop: end_turn`: `The tool said: R` (the first 400 bytes of the result text) plus ` (and you said: T)` when there is text too; otherwise `echo: T` |
 
-With `MOCK_SCRIPT=path`, the file is JSON lines. Response *n* (*n* = the
-number of assistant messages in the request) is the *n*th group of lines ending
-in a `result` line; each line is written as is, except:
+With `MOCK_SCRIPT=path`, the file is JSON lines. A group is the lines up to
+and including a `result` line. With *n* assistant messages in the request,
+the response is group *n* + 1; each line is written as is, except:
 
 | Line | Effect |
 |---|---|

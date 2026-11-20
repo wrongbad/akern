@@ -157,7 +157,7 @@ empty means `null`), `param_members`.
 | deliver | appends one user message: the call answers (`calls_take_turn_results`, in `waiting` only), then `inbox_take` of the modes due. `source` is `results`, `inbox` or `results+inbox`; nothing to deliver, no message |
 | begin a turn | `turn` + 1; the request ([providers.md §2](providers.md#2-request)): `session_context` (keeping the messages' entry ids), the system text, `calls_tool_schemas`, params; spawn the provider (none found: error, `run_end` `error`); `turn_start` |
 | omit a rejected block | the provider's `error` has `kind: invalid_block` and an `at` ([providers.md §4](providers.md#4-errors)), fewer than 8 have been omitted since the run began or a provider last gave a `result`, `at.message` is an index into the request's messages, and `message_omit_media` finds an image or document there in the entry's current message: append `replace` (`target` the entry, `message` the result) and a `replace` event. Otherwise it is an ordinary failure |
-| settle | a turn ended without tool calls, or the provider failed: held appends; any `now`, `turn` or `idle` item due → deliver, begin a turn; otherwise `run_end` (`done`, or `error` after a failure) → `idle`, and `sink_answer` with the run's last assistant text |
+| settle | a turn ended without tool calls, or the provider failed: held appends; any `now`, `turn` or `idle` item due → deliver, begin a turn; otherwise `sink_answer` with the run's last assistant text, then `run_end` (`done`, or `error` after a failure) → `idle` |
 
 A `waiting` turn wakes only for items queued after it began waiting: a line
 typed while the model streamed waits for the calls and goes with their results.

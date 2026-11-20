@@ -20,6 +20,8 @@ The goal is feature parity with the [pi](https://github.com/earendil-works/pi) c
 
 In some ways we already exceed base pi capabilities. Concurrent tool calls and recursive sub-agent calls come for free with the subprocess design.
 
+`akern` exposes exactly 3 tool calls to models: `exec`, `read`, and `write`. You could imaging we get by with only exec, since you can call `cat` and such. But we hold the stdin pipe handle for launched subprocesses, so we can only write to that in-process.
+
 ## Developing
 
 ```sh
@@ -58,6 +60,7 @@ See [tools.md §3](docs/tools.md#install) for details.
 |---|---|
 | [docs/design.md](docs/design.md) | goals, principles, costs and security posture |
 | [docs/akern.md](docs/akern.md) | the kernel process: environment, arguments, stdin commands, stdout events, session files |
+| [docs/turn.md](docs/turn.md) | one typed prompt with two tool calls, step by step: the processes and events |
 | [docs/kernel.md](docs/kernel.md) | `src/`: each module's state and API, delivery modes, jobs, the dependency graph |
 | [docs/providers.md](docs/providers.md) | `providers/`: the request, the event stream, errors, the message schema; anthropic, claude-code, openai, mock |
 | [docs/tools.md](docs/tools.md) | `tools/` and `skills/`: `exec`, `read`, `write`, programs on `PATH`, skills, the `akern-cli` front end |

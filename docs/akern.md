@@ -487,7 +487,7 @@ Kernel errors:
 
 | `where` | `message` | Then |
 |---|---|---|
-| `provider` | `no provider for <model> in <home>/providers` | run ends `error` |
+| `provider` | `no provider for <model> in <home>/providers or <home>/system/providers` | run ends `error` |
 | `provider` | `invalid line from provider` | line dropped |
 | `provider` | `provider exited without a result` | run ends `error`, or continues if inbox items are due; not sent if the provider already wrote an `error` line |
 | `kernel` | `session append failed; stopping` | shutdown, exit 1 |
