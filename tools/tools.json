@@ -1,0 +1,106 @@
+[
+  {
+    "name": "shell",
+    "description": "Run a command with bash. stderr goes to the same place as stdout, in the order written, as with 2>&1. The result's first line is always a header in brackets, [exit N] or [signal N], adding '; cut at N of M bytes, all of it in FILE' when the output was longer than output_limit; every line after it is the output, as is. Each call runs in a fresh shell in the working directory: cd, variables and activated environments do not carry over, so chain them in one command (cd sub && make). To read a file, run cat -n (with line numbers), head or tail, or cat -n FILE | sed -n '100,200p' for a range; to write one, run cat > path (or cat >> path to add to it) with the text in stdin. You get the result when the command finishes, unless wait runs out or a message arrives first: then it keeps running as a job, and its result arrives later as a message. When a successful command's output is a PNG, JPEG, GIF or WebP image or a PDF (cat shot.png, a converter), you receive it as an image or document instead of text; send stderr elsewhere for those (magick in.tiff png:- 2>err.txt), or its messages corrupt the image. Other output that is not text is not shown.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "The command line, as you would type it: pipes, redirects, && and quoting all work."
+        },
+        "stdin": {
+          "type": "string",
+          "description": "Text sent to the command's stdin, exactly as given, with no quoting or escaping: file contents for cat > path, input for a program. Without it, stdin is empty."
+        },
+        "eof": {
+          "type": "boolean",
+          "description": "false to keep stdin open after any stdin text, so you can send more later with the job tool (a REPL, a sub-agent). By default the command sees the end of its input after stdin."
+        },
+        "wait": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Seconds to wait for the command to finish; by default, until it does. If it is still running then, it keeps running as a job, and its result arrives later as a message or from the job tool. 0 for a command you do not need to wait for: a server, a watcher, a sub-agent you will steer."
+        },
+        "stdout_name": {
+          "type": "string",
+          "description": "A name for a PDF the command writes as its output, shown with the document."
+        },
+        "output_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bytes of output kept in the result (default 100000). When there is more, all of it is saved to the file the first line names, so you can read the rest with tail, sed or grep, or rerun with a larger limit."
+        }
+      },
+      "required": [
+        "command"
+      ]
+    },
+    "program": "bash"
+  },
+  {
+    "name": "job",
+    "description": "Act on a job: a shell call still running after its reply, named by that call's id. In order, it sends stdin, closes stdin with eof, sends a signal, then waits for the job to end; give any of them, or none to ask whether the job is still running.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The id of the shell call that started the job."
+        },
+        "stdin": {
+          "type": "string",
+          "description": "Text to send to the job's stdin, exactly as given, with no quoting or escaping. The shell call must have set eof to false."
+        },
+        "eof": {
+          "type": "boolean",
+          "description": "true to close the job's stdin after any stdin text, so the program sees the end of its input."
+        },
+        "signal": {
+          "type": "string",
+          "description": "A signal for the job's whole process group: TERM to stop it, INT, KILL, HUP, QUIT, USR1, USR2, STOP, CONT, or a number. The job's result still arrives."
+        },
+        "wait": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Seconds to wait for the job to end. If it does, the reply says how, and the job's result arrives with it; if not, the reply says it is still running."
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "edit",
+    "description": "Replace exact text in a file. The file is replaced atomically, keeping its mode, and the reply shows the changed lines, numbered. Read the file first, and copy old from what you read.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file to edit, relative to the working directory or absolute."
+        },
+        "old": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The exact text to replace, indentation and line breaks included, with no escaping. It must match exactly once unless `all` is true; if it matches more often, include surrounding lines to make it unique."
+        },
+        "new": {
+          "type": "string",
+          "description": "The text to put in its place, exactly as it should appear."
+        },
+        "all": {
+          "type": "boolean",
+          "description": "true to replace every match of old instead of requiring exactly one."
+        }
+      },
+      "required": [
+        "path",
+        "old",
+        "new"
+      ]
+    },
+    "program": "akern-edit"
+  }
+]

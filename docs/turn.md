@@ -1,7 +1,7 @@
 # Turn
 
-One line typed into `akern-cli`. The model calls `read` (`README.md`) and `exec`
-(`ls src`) together, then answers. Nothing interrupts it.
+One line typed into `akern-cli`. The model makes two `shell` calls together,
+`cat README.md` and `ls src`, then answers. Nothing interrupts it.
 
 `A → B: …` is data moving from one place to another. `akern`'s stdout is piped
 to `render.jq`, so every event goes `akern → render.jq`; events are in
@@ -10,12 +10,13 @@ to `render.jq`, so every event goes `akern → render.jq`; events are in
 
 - `akern-cli` starts, picks the model (`AKERN_MODEL`, `$AKERN_HOME/model`, or
   `akern-model`) and starts `akern | render.jq`.
-- `akern` launches the `prompt` program (`$AKERN_HOME/prompt`, else
-  `$AKERN_HOME/system/prompt`).
+- `akern` launches the `system-prompt` program (`$AKERN_HOME/system-prompt`, else
+  `$AKERN_HOME/system/system-prompt`).
 - `prompt → akern`: your `system.md`, the skill list and the `AGENTS.md` files.
-  `prompt` exits; this text is the system prompt of every request this `akern`
-  sends.
-- `akern` creates the session file.
+  `system-prompt` exits; this text is the startup system prompt.
+- `akern` creates the session file and appends a `settings` entry with the
+  model and that text; it is what every request uses until another one is
+  appended.
 - `akern → render.jq`: a `hello` event, naming the session and the model.
   `render.jq` shows `› waiting for input`.
 - You type `what is in this project?`.
@@ -37,16 +38,14 @@ to `render.jq`, so every event goes `akern → render.jq`; events are in
 - The provider exits.
 - `akern → session file`: the assistant message, byte for byte.
 - `akern → render.jq`: a `message` event with it.
-- `akern → render.jq`: a `tool_start` event for `read`. The calls start only
-  now, after the provider has exited.
-- `akern` runs `read` (the first tool call) itself.
-- `akern → render.jq`: a `tool_end` event for `read`.
-- `akern → render.jq`: a `tool_start` event for `exec`.
-- `akern` runs `exec` `ls src` (the second tool call) in its working directory.
-- `ls → akern`: its stdout and stderr. `ls` exits.
-- `akern → render.jq`: a `tool_end` event for `exec`.
+- `akern → render.jq`: a `tool_start` event for each call, in order. The calls
+  start only now, after the provider has exited.
+- `akern` runs `bash -c 'cat README.md'` and `bash -c 'ls src'` at once, in
+  its working directory; bash runs each program in its own place.
+- `cat → akern`, `ls → akern`: their stdout and stderr. Each exits.
+- `akern → render.jq`: a `tool_end` event for each, as it finishes.
 - `akern → session file`: both results in one user message, in call order
-  (`read`, then `exec`).
+  (`cat`, then `ls`).
 - `akern → render.jq`: a `message` event with it.
 - `akern → render.jq`: a `turn_end` event, turn 1, with its token usage.
 - `akern → render.jq`: a `turn_start` event, turn 2.
@@ -67,4 +66,4 @@ The model runs only in a new provider process, one per turn. A line arriving
 while idle starts one; so does the last running call of a turn finishing, and
 results that finish together share one message. A `"wait": false` call would
 be answered `tool_pending` at once, and its later exit would wake the model
-again with a `job_result` ([kernel.md](kernel.md#sequences)).
+again with a `job_result` ([akern.md: delivery modes](akern.md#delivery-modes)).

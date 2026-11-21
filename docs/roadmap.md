@@ -1,7 +1,7 @@
 # Roadmap
 
 Work not yet done, and decisions still open. What exists is specified in
-[akern.md](akern.md), [kernel.md](kernel.md),
+[akern.md](akern.md), the `akern/` headers,
 [providers.md](providers.md) and [tools.md](tools.md); why, in
 [design.md](design.md). Everything below is userland unless it says otherwise.
 
@@ -59,7 +59,7 @@ Once the code stops churning:
 
 | Test | |
 |---|---|
-| json | unit tests and a fuzz target for `src/json.c`, the only code that takes untrusted bytes apart |
+| json | unit tests and a fuzz target for `shared/json.c`, the only code that takes untrusted bytes apart |
 | stress | random scenarios under ASan, checked by `tests/invariants.py`, for 10 minutes |
 | finish orders | every finish order of three parallel calls, driven by `tests/bin/gate` |
 | cascade | shutdown through three levels of sub-agents |
@@ -68,20 +68,12 @@ Once the code stops churning:
 
 ### Exec wrapper
 
-Whether the kernel runs every `exec` through a wrapper (`--exec-via PROG`:
-argv becomes `PROG argv…`), so one program can sandbox, confirm, log or
-forward calls (a container, `ssh`). Today a shim on `PATH` wraps one program,
-and only an OS sandbox around the whole kernel covers everything
-([design.md](design.md#no-interception-points)).
-
-Tied to it: how `read` and `write`, which run in the kernel, would be
-intercepted.
-
-| Option | Cost |
-|---|---|
-| no flag; whole-kernel sandbox and `PATH` shims | `read` and `write` pass no policy point |
-| `--exec-via` for `exec` only | `read` and `write` still need the sandbox |
-| `--exec-via`, with `read` and `write` run as programs through it | a process per file call; media and atomic replace move out of the kernel |
+Settled without a flag: every call runs its tool's `command` from
+`tools.json` (`bash` or `akern-edit`), looked up on
+`PATH`, so a shim of one of them, or another `command`, is the wrapper for its
+whole tool: it can sandbox, confirm, log or forward calls (a container, `ssh`)
+([tools.md](tools.md#1-built-in-tools)). The cost is a process per file
+call.
 
 ### Event set
 
@@ -106,18 +98,20 @@ a second UI) get a way in.
 
 ### Where settings live
 
-The kernel reads flags and environment only. The default model already has a
-home: `$AKERN_HOME/model`, one line, written by `akern-model` and turned into
-`AKERN_MODEL` by the `akern-cli` front end ([tools.md §4](tools.md#4-the-akern-cli-front-end)).
-Still open: the other settings (`-P` params such as effort, the system prompt,
+The kernel reads flags and environment, and records the model, system prompt
+and params in the session as `settings` entries, so a resumed session keeps
+them ([akern.md](akern.md#settings)). The default model for a new session
+already has a home: `$AKERN_HOME/model`, one line, written by `akern-model` and
+turned into `AKERN_MODEL` by the `akern-cli` front end ([tools.md §4](tools.md#4-the-akern-cli-front-end)).
+Still open: defaults for the other settings (`-P` params such as effort,
 limits), and whether each gets a one-value file like `model` or they share a
 `~/.akern/config`. *Leaning:* the `akern-cli` front end, with `key=value` lines that
 a shell reads without a parser, so front ends in any language share it.
 
 Project-local skills and prompts (`./.akern/`, honored only in trusted
-directories) are not read by the shipped `prompt`, which never runs anything
+directories) are not read by the shipped `system-prompt`, which never runs anything
 from the project; the kernel reads `AKERN_HOME` alone. A user's own
-`$AKERN_HOME/prompt` can choose to honor them, deciding itself which
+`$AKERN_HOME/system-prompt` can choose to honor them, deciding itself which
 directories it trusts. Decide when a real project needs it.
 
 ### Jobs after a kernel restart
@@ -137,7 +131,7 @@ any option.
 ### Orphans after the kernel is killed on macOS
 
 There is no `PR_SET_PDEATHSIG`, so `SIGKILL` of the kernel can leave workers
-running ([kernel.md: proc](kernel.md#proc)).
+running ([proc.h](../akern/proc.h)).
 
 | Option | Cost |
 |---|---|

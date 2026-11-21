@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from conftest import BUILD
+from conftest import BUILD, PATIENCE
 
 PROVIDER = BUILD / "system" / "providers" / "openai"
 
@@ -98,7 +98,7 @@ def api():
         request = {"model": model, "system": system, "messages": messages, "tools": tools or [], "params": params or {}}
         run_env = env if key else {k: v for k, v in env.items() if k != "OPENAI_API_KEY"}
         finished = subprocess.run([PROVIDER, *args], input=json.dumps(request), env=run_env, capture_output=True,
-                                  text=True, timeout=30)
+                                  text=True, timeout=PATIENCE)
         lines = [json.loads(line) for line in finished.stdout.splitlines()]
         return Sent(seen[:], lines, finished.returncode)
 

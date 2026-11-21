@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from conftest import BUILD, REPO
+from conftest import BUILD, PATIENCE, REPO
 
 PROVIDER = BUILD / "system" / "providers" / "claude-code"
 
@@ -38,7 +38,7 @@ def claude(tmp_path):
         env = {**os.environ, **(host_env or {}), "PATH": f"{REPO / 'tests' / 'bin'}{os.pathsep}{os.environ['PATH']}",
                "FAKE_CLAUDE_LOG": str(tmp_path / "log.json"), "FAKE_CLAUDE_REPLY": str(tmp_path / "reply.jsonl")}
         request = {"model": "haiku", "system": "be brief", "messages": messages, "tools": [EXEC], "params": params or {}}
-        done = subprocess.run([PROVIDER], input=json.dumps(request), env=env, capture_output=True, text=True, timeout=30)
+        done = subprocess.run([PROVIDER], input=json.dumps(request), env=env, capture_output=True, text=True, timeout=PATIENCE)
         return done, json.loads((tmp_path / "log.json").read_text())
     return run
 
@@ -65,7 +65,7 @@ def test_history_goes_in_as_stream_json_turns_with_only_the_last_one_queried(cla
         "haiku", "be brief", "low", "1"]
     assert seen["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "900"
     [server] = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"].values()
-    tools = subprocess.run([server["command"], *server["args"]], capture_output=True, text=True, timeout=10, input=
+    tools = subprocess.run([server["command"], *server["args"]], capture_output=True, text=True, timeout=PATIENCE, input=
                            '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n').stdout
     assert json.loads(tools)["result"]["tools"] == [
         {"name": "exec", "description": "Run a program.", "inputSchema": EXEC["input_schema"]}]
@@ -132,7 +132,7 @@ def test_claude_runs_without_the_host_sessions_claude_variables(claude):
 def test_models_lists_the_aliases_claude_documents_without_running_it(tmp_path):
     log = tmp_path / "log.json"
     done = subprocess.run([PROVIDER, "--models"], env={"PATH": f"{REPO / 'tests' / 'bin'}:/usr/bin:/bin",
-                          "FAKE_CLAUDE_LOG": str(log)}, capture_output=True, text=True, timeout=10)
+                          "FAKE_CLAUDE_LOG": str(log)}, capture_output=True, text=True, timeout=PATIENCE)
     assert (done.returncode, done.stderr) == (0, "")
     assert [json.loads(line) for line in done.stdout.splitlines()] == [
         {"id": "fable"}, {"id": "sonnet"}, {"id": "opus"}, {"id": "haiku"}]
@@ -140,6 +140,6 @@ def test_models_lists_the_aliases_claude_documents_without_running_it(tmp_path):
 
 
 def test_models_without_claude_on_path_is_an_error(tmp_path):
-    done = subprocess.run([PROVIDER, "--models"], env={"PATH": str(tmp_path)}, capture_output=True, text=True, timeout=10)
+    done = subprocess.run([PROVIDER, "--models"], env={"PATH": str(tmp_path)}, capture_output=True, text=True, timeout=PATIENCE)
     assert done.returncode == 1
     assert json.loads(done.stdout) == {"type": "error", "kind": "other", "message": "claude is not on PATH", "status": 0}

@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from conftest import BUILD
+from conftest import BUILD, PATIENCE
 
 FAKE = """#!/bin/sh
 case $1 in --models) printf '%s\\n' '{"id":"a","context":5}' '{"id":"b"}'; exit ;; esac
@@ -30,6 +30,7 @@ def home(tmp_path):
     (home / "providers").mkdir(parents=True)
     (home / "system" / "providers").mkdir(parents=True)
     (home / "system" / "render.jq").symlink_to(BUILD / "system" / "render.jq")
+    (home / "system" / "tools.json").symlink_to(BUILD / "system" / "tools.json")
     for layer in (home, home / "system"):
         (layer / "providers" / "mock").symlink_to(BUILD / "system" / "providers" / "mock")
     for name, text in {"fake": FAKE, "broken": BROKEN, "silent": SILENT_FAILURE, "quiet": QUIET}.items():
@@ -46,7 +47,7 @@ def env(akern_env, home, tmp_path):
 def detached(argv, env):
     """Runs argv in a session of its own, with no controlling terminal."""
     return subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                          start_new_session=True, timeout=10)
+                          start_new_session=True, timeout=PATIENCE)
 
 
 class Terminal:
@@ -63,7 +64,7 @@ class Terminal:
         return self.screen.decode(errors="replace").replace("\r\n", "\n")
 
     def read(self):
-        assert select.select([self.fd], [], [], 5)[0], f"terminal idle: {self.text!r}"
+        assert select.select([self.fd], [], [], PATIENCE)[0], f"terminal idle: {self.text!r}"
         with contextlib.suppress(OSError):
             chunk = os.read(self.fd, 4096)
             self.screen.extend(chunk)

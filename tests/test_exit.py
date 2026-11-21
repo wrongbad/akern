@@ -7,13 +7,13 @@ import subprocess
 
 import pytest
 
-from conftest import BUILD, parallel, seen, shell, signal_when, tool, wait_for
+from conftest import BUILD, PATIENCE, parallel, seen, shell, signal_when, tool, wait_for
 from test_files import TINY_PNG
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP], ids=["term", "hup"])
 def test_shutdown_mid_tool_answers_every_call_and_closes_every_job_then_exits_130(kernel, sig):
-    run = kernel(parallel(tool("exec", argv=["sleeper", "30"], wait=False), shell("sleeper 30")),
+    run = kernel(parallel(tool("shell", command="sleeper 30", wait=0), shell("sleeper 30")),
                  during=signal_when((seen("tool_progress", 2), sig)), code=130)
     assert run.result_texts == ["Killed: the run was aborted."]
     [pending] = run.pending
@@ -26,14 +26,15 @@ def test_shutdown_closes_a_job_with_its_usual_result_not_its_raw_stdout(kernel, 
     png = tmp_path / "tiny.png"
     png.write_bytes(TINY_PNG)
     program = f"trap 'cat {png} && exit 0' TERM\necho ready >&2\nsleep 30 & wait"
-    run = kernel(tool("exec", argv=["sh", "-c", program], stdout_type="image/png", wait=False),
+    run = kernel(tool("shell", command=program, wait=0),
                  during=signal_when((seen("tool_progress"), signal.SIGTERM)), code=130)
     [(_, result)] = run.job_reports
-    assert result == {"stdout": f"({len(TINY_PNG)} bytes not shown: the program failed)", "stderr": "ready\n", "exit": 0}
+    assert (result["killed"], result["exit"], result["hidden"], result["total"]) == (True, 0, "binary output", len(TINY_PNG) + 6)
+    assert result["output"] == ""
 
 
 def test_sigint_aborts_keeping_jobs_and_a_second_within_3s_shuts_down(kernel):
-    run = kernel(parallel(tool("exec", argv=["sleeper", "30"], wait=False), shell("sleeper 30")),
+    run = kernel(parallel(tool("shell", command="sleeper 30", wait=0), shell("sleeper 30")),
                  during=signal_when((seen("tool_progress", 2), signal.SIGINT), (seen("run_end"), signal.SIGINT)), code=130)
     assert run.result_texts == ["Killed: the run was aborted."]
     assert len(run.pending) == len(run.job_reports) == 1
@@ -50,7 +51,7 @@ def test_ctrl_c_in_the_front_end_aborts_and_hints_and_a_second_quits(tmp_path, a
     screen = bytearray()
 
     def read():
-        assert select.select([fd], [], [], 5)[0], f"terminal idle: {screen.decode(errors='replace')!r}"
+        assert select.select([fd], [], [], PATIENCE)[0], f"terminal idle: {screen.decode(errors='replace')!r}"
         with contextlib.suppress(OSError):
             chunk = os.read(fd, 4096)
             screen.extend(chunk)
@@ -64,7 +65,7 @@ def test_ctrl_c_in_the_front_end_aborts_and_hints_and_a_second_quits(tmp_path, a
     try:
         until("waiting for input")
         os.write(fd, b"!sleeper 30\r")
-        until("▸ exec")
+        until("▸ shell")
         os.write(fd, b"\x03")
         until("press Ctrl-C again within 3s to quit")
         until("aborted]")
@@ -85,7 +86,7 @@ def test_ctrl_c_in_the_front_end_aborts_and_hints_and_a_second_quits(tmp_path, a
 
 def test_print_mode_writes_only_the_final_answer(kernel):
     run = kernel(shell("echo hi"), "-p")
-    assert run.output == 'The tool said: {"stdout":"hi\\n","stderr":"","exit":0}\n'
+    assert run.output == "The tool said: [exit 0]\nhi\n\n"
 
 
 def test_a_run_ending_in_error_exits_1_and_print_mode_says_why_on_stderr(kernel):
@@ -104,7 +105,7 @@ def test_an_unknown_flag_or_a_bad_value_prints_usage_and_exits_2(kernel, args):
 
 @pytest.mark.parametrize("limit", ["0", "-1", "deep"])
 def test_a_recursion_limit_below_1_refuses_to_start(kernel, limit):
-    run = kernel("hello", env={"AKERN_RECURSION_LIMIT": limit}, code=2)
+    run = kernel("hello", env={"AKERN_RE_LIMIT": limit}, code=2)
     assert run.output == ""
     assert run.stderr.startswith("akern: recursion limit reached")
 

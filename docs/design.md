@@ -1,7 +1,7 @@
 # Design
 
 Why akern is shaped the way it is. The contracts themselves are in the API
-docs: [akern.md](akern.md) (the process), [kernel.md](kernel.md)
+docs: [akern.md](akern.md) (the process), the headers in `akern/` and `shared/`
 (its modules), [providers.md](providers.md) and [tools.md](tools.md).
 
 ## What this is
@@ -72,7 +72,7 @@ and messages that interrupt a turn are part of the kernel from the start.
 9. **Discovery by `PATH` and one directory.** Put an `akern-*` tool on `PATH`
    and it can be used. Drop a provider in `~/.akern/providers/` and the next
    request can use it. The system prompt is a program's output: the kernel
-   runs `~/.akern/prompt`, else `~/.akern/system/prompt`, once at startup, and
+   runs `~/.akern/system-prompt`, else `~/.akern/system/system-prompt`, once at startup, and
    what assembles the prompt (skills, `AGENTS.md`, your own text) is that
    program's business. No registry, no manifest, no reload command.
 10. **Fail closed.** A broken permission gate must never mean "allowed": a shim
@@ -82,27 +82,29 @@ and messages that interrupt a turn are part of the kernel from the start.
     state between calls, look at a background job's output, edit files and
     write scripts, so none of that is our code. What it needs from us is what a
     process needs from an OS kernel, its core syscalls: the agent kernel gives
-    it `exec`, `read` and `write`, over files and jobs. The one guard in `exec`
+    it `shell` and `job`, over files and jobs (files are read and written
+    with `cat` in the shell). One convenience is shipped as a tool too, `edit`, because nearly
+    every coding turn uses it and models are trained on it. Each tool runs a
+    program (`bash`, `akern-edit`) that `tools.json` names (`job` runs in the kernel), so
+    none is built into the kernel. The one guard in `shell`
     is the output limit, which spills to a file and loses nothing; it has to be
     in the kernel, because once output is in the context it is too late.
 12. **The command line is the interface, for the model too.** Every other
     capability is a program on `PATH` plus a skill that says how to call it
-    (`akern -p` for a sub-agent, `akern-edit` to change a file,
-    `gh`, a project's scripts). A capability added for people is automatically
+    (`akern -p` for a sub-agent, `gh`, a project's scripts). A capability added for people is automatically
     available to the model, and the reverse. No wrappers: a wrapper exists
     only because an API is missing, so fix the API instead.
 13. **Every completion wakes the model.** A finished command or job is always
     delivered; no option suppresses or defers a completion to save tokens
-    ([kernel.md: inbox](kernel.md#delivery-modes)). A silent exit, like a
+    ([akern.md: delivery modes](akern.md#delivery-modes)). A silent exit, like a
     crashed dev server, can ruin a long unattended session. A person may still
     send their own message `deferred`.
-14. **Content is a black box.** akern's code does not know what a JPEG, a
-    WebP or a PDF is: no format detection, no header parsing, no list of file
-    types. It moves the bytes as given; the model names a MIME type (`read`'s
-    `type`, `exec`'s `stdout_type`) when it wants them shown as an image or
-    document; the API decides what it accepts; a block the API rejects is
-    replaced with a note in the session, so no later request sends it again.
-    A fixed list goes stale, and the model judges file types better.
+14. **Content is a black box, but for five signatures.** akern parses no
+    file format. It knows only the first bytes of the five formats every
+    provider takes, PNG, JPEG, GIF, WebP and PDF, and a `shell` call whose stdout
+    starts with one comes back as an image or document; everything else is
+    text. The API decides what it accepts; a block the API rejects is replaced
+    with a note in the session, so no later request sends it again.
 15. **Tools don't know each other.** A tool's output, errors and usage text
     included, never names another tool or built-in, and an error states the
     problem, never a remedy. Advice, and how tools fit together, belongs in
@@ -110,7 +112,7 @@ and messages that interrupt a turn are part of the kernel from the start.
     without another's text going stale.
 16. **Docs mirror directories and executables.** One reference doc per
     directory or executable: [akern.md](akern.md) for the kernel
-    process, [kernel.md](kernel.md) for `src/`, [providers.md](providers.md)
+    process, the header comments for `akern/` and `shared/`, [providers.md](providers.md)
     for `providers/`, [tools.md](tools.md) for `tools/` and `skills/`. Every
     fact lives in one place; other docs link to it. A walkthrough such as
     [turn.md](turn.md) orders those facts and links to them.
@@ -127,11 +129,11 @@ and messages that interrupt a turn are part of the kernel from the start.
 |---|---|
 | Front end: whatever drives the kernel | commands on stdin, events on stdout: [akern.md](akern.md) |
 | Provider: request in, response out | [providers.md](providers.md) |
-| Tools: `exec`, `read`, `write`, and programs on `PATH` | [tools.md](tools.md) |
+| Tools: `shell`, `job`, `edit`, and programs on `PATH` | [tools.md](tools.md) |
 
 The front end's pipes are the kernel's only channels. Whoever starts a kernel
 owns the conversation with it, and the pipes along the process tree are enough:
-a person types into the terminal `akern-cli` runs in, a parent agent `write`s to its
+a person types into the terminal `akern-cli` runs in, a parent agent sends `job` input to its
 sub-agent's stdin pipe. There is no control socket. What that gives up, on
 purpose: attaching a second UI to an agent already running elsewhere (run it in
 tmux; a separate relay program could add it later without kernel changes), and
@@ -167,16 +169,16 @@ that for this repository.
 | Concern | Where it lives |
 |---|---|
 | Talking to a model API, auth, retries, cache breakpoints | the provider |
-| `AGENTS.md`, skills, system prompt assembly | the prompt program, run once at startup: `$AKERN_HOME/prompt`, else the shipped `$AKERN_HOME/system/prompt`; or a fixed file with `-S`; a wrapping provider per request |
+| `AGENTS.md`, skills, system prompt assembly | the system-prompt program, run once at startup: `$AKERN_HOME/system-prompt`, else the shipped `$AKERN_HOME/system/system-prompt`; or a fixed file with `-S`; a wrapping provider per request |
 | Prompt templates, `!cmd`, `@file` expansion | the frontend |
 | How pending calls and job results are worded | the provider |
 | Permission gates, path protection, sandboxing | an OS sandbox around the whole kernel, or a shim on `PATH` |
 | Which calls go to the background | the model (`"wait": false` on the call) |
-| Output redaction, summarizing | a shim on `PATH` (the size cap is `exec`'s `stdout_limit`) |
+| Output redaction, summarizing | a shim on `PATH` (the size cap is `shell`'s `output_limit`) |
 | Compaction, fork, tree, export, session listing | commands (`akern-*`) |
-| Sub-agents | another `akern -p`, run through `exec`; the kernel only counts down `AKERN_RECURSION_LIMIT` |
-| Job control for the model | the `tool_pending`'s pid and files, worded by the provider; `tail` and `kill` through `exec`; `write {job}` for input; to wait, end the turn |
-| Steering | a person types into the terminal; a parent `write`s a line to its sub-agent's job |
+| Sub-agents | another `akern -p`, run through `shell`; the kernel only counts down `AKERN_RE_LIMIT` |
+| Job control for the model | the `tool_pending`'s pid and files, worded by the provider; `tail` through `shell`; `job` for input, end of input, signals and waiting; or end the turn |
+| Steering | a person types into the terminal; a parent sends a line to its sub-agent with `job` |
 | Shells, file editing, state between calls | the model, using whatever is installed |
 | Settings files, model aliases | the `akern-cli` front end and frontends |
 | Rendering, key bindings, themes, editors | frontends; `akern-cli`'s display is `$AKERN_HOME/render.jq`, else `$AKERN_HOME/system/render.jq` |
@@ -190,23 +192,23 @@ a result. Interception is built in user space, at the seams it already has.
 | Seam | How |
 |---|---|
 | Provider | wrap or replace `$AKERN_HOME/providers/<name>`: change the request on stdin, `exec` the real provider, or filter its output |
-| Tools | `exec` looks `argv[0]` up on `PATH`, so a shim earlier on `PATH` wraps any program: check, rewrite, log, redact |
+| Tools | every call runs the program its tool's `program` in `tools.json` names (`bash -c COMMAND`, `akern-edit PATH …`), looked up on `PATH`, and the shell looks up each program it runs on `PATH` in turn, so a shim earlier on `PATH` wraps a whole tool or any one program: check, rewrite, log, redact. Your own `tools.json` can also point a tool at another program ([tools.md](tools.md#1-built-in-tools)) |
 | Front end | a program that writes the kernel's stdin commands and reads its stdout events |
 
 | Pi hook point | Here |
 |---|---|
 | `input` | the front end rewrites a prompt before it sends it |
-| `request` | a wrapping provider; the system prompt is the prompt program's output, fixed at startup and changed only by `set` |
+| `request` | a wrapping provider; the system prompt is the system-prompt program's output, recorded in the session as a `settings` entry and changed by appending another |
 | `tool_call` | a shim on `PATH`; an OS sandbox around the whole kernel |
 | `tool_result` | a shim on `PATH` that filters its program's output |
 | `turn_end` | the front end, on the `turn_end` event: logging, checkpoints |
 | `idle` | the front end, on `run_end`: `send` to continue or retry |
 
-Not covered: a permission prompt or output redaction per call inside one
-kernel, for `read` and `write` (which run in the kernel) and for programs no
-shim wraps (an absolute path, a command inside `sh -c`). Confine the whole
-kernel in an OS sandbox (a container, `bwrap`, `sandbox-exec`), as pi does, or
-put the policy in an `exec` shim on `PATH`.
+A wrapper named as the shell tool's `program` sees every `shell` call's
+command (a shim of `bash` on `PATH` would too, but also every other bash on
+the machine), but not what the commands go on to do (a script's file access,
+a program run by absolute path). Confine the whole kernel in an OS
+sandbox (a container, `bwrap`, `sandbox-exec`), as pi does, for that.
 
 ## What this design costs
 
@@ -232,7 +234,7 @@ Stated plainly so they can be argued with:
   ([tools.md](tools.md#akern_ask)), and the frontend decides what that looks
   like.
 - **The HTTP providers have a dependency** (libcurl). The kernel stays
-  dependency-free; the HTTP stack is `providers/lib/http.c`, linked only into
+  dependency-free; the HTTP stack is `providers/http.c`, linked only into
   the providers that call an API over HTTP.
 
 ## Security posture
@@ -240,17 +242,19 @@ Stated plainly so they can be argued with:
 Same stance as pi: no built-in permission prompts. Out of the box the model can
 run any tool with your privileges. Safety is composed:
 
-- gate individual programs with a shim on `PATH`,
+- gate a whole tool by naming a wrapper as its `program` in your
+  `tools.json` (or with a shim of `akern-edit` on `PATH`),
+  and individual programs with a shim of their own on `PATH`,
 - restrict what the model can run with a restricted `PATH`,
 - or run the whole thing inside a container, VM or OS sandbox. One process
   tree with one working directory is easy to confine, and only this covers
-  `read` and `write`, which run in the kernel and pass no shim. It needs no
+  what a program does once it runs. It needs no
   kernel change: the front end starts `akern` inside the container
   (`docker run -i …`), and the pipes cross the boundary like any other.
 
 Only the process that started a kernel can drive it: there is no listening
-endpoint. A `stdin_open` pipe is anonymous: only the kernel holds its write
-end, and the model reaches it only through `write`.
+endpoint. A job's stdin pipe is anonymous: only the kernel holds its write
+end, and the model reaches it only through `job`.
 
 The kernel's own obligations are narrow: never run project code that the user
 did not trust, kill everything it started, and

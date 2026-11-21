@@ -9,7 +9,7 @@ fields ignored, `x-` names): [akern.md](akern.md#conventions).
 
 | Step | Rule |
 |---|---|
-| name | `-m provider/model` (or `AKERN_MODEL`, or `set`): the part before the first `/` is the provider, the rest the request's `model` (`""` when there is no `/`) |
+| name | `-m provider/model` (or `AKERN_MODEL`, or a `settings` entry): the part before the first `/` is the provider, the rest the request's `model` (`""` when there is no `/`) |
 | lookup | `$AKERN_HOME/providers/<provider>`, then `$AKERN_HOME/system/providers/<provider>`; the first which must be executable. A name starting with `.` is never run. Not found: `error` `{"where":"provider","message":"no provider for <model> in <home>/providers or <home>/system/providers"}` and the run ends `error` |
 | spawn | once per turn, with no arguments, in its own process group, in the kernel's working directory; environment as for every child ([akern.md §1](akern.md#set-for-children)) |
 | stdin | the request (§2), then EOF |
@@ -29,17 +29,17 @@ One JSON object on stdin:
 {"model":"claude-opus-5-5",
  "system":"You are …",
  "messages":[ … ],
- "tools":[{"name":"exec",…},{"name":"read",…},{"name":"write",…}],
+ "tools":[{"name":"shell",…},{"name":"write",…},{"name":"edit",…}],
  "params":{"effort":"high","max_tokens":64000}}
 ```
 
 | Field | Value |
 |---|---|
 | `model` | string; the part of `provider/model` after the `/` |
-| `system` | the system prompt: fixed when `akern` starts, or by a `set` command ([akern.md](akern.md#system-prompt)); `null` when empty |
+| `system` | the system text in effect ([akern.md](akern.md#settings)); `null` when empty |
 | `messages` | the context: the `message` of each `message` entry from the session's head back to a root, oldest first ([akern.md §5](akern.md#session-file)); shape in §5 |
-| `tools` | the built-in tool definitions, `{name, description, input_schema}` ([tools.md §1](tools.md#1-built-in-tools)) |
-| `params` | object from `-P` and `set`; the provider defines its keys and ignores the rest |
+| `tools` | the tool definitions from `tools.json`, `{name, description, input_schema}`, compacted to one line ([tools.md §1](tools.md#1-built-in-tools)) |
+| `params` | object, the params in effect, from `-P` or a `settings` entry ([akern.md](akern.md#settings)); the provider defines its keys and ignores the rest |
 
 ## 3. Output
 
@@ -49,8 +49,8 @@ JSON lines on stdout: zero or more events, then exactly one terminal line,
 ```json
 {"type":"text_delta","text":"I'll "}
 {"type":"thinking_delta","text":"…"}
-{"type":"tool_use_start","id":"tu_01","name":"exec"}
-{"type":"tool_use_delta","id":"tu_01","json":"{\"argv"}
+{"type":"tool_use_start","id":"tu_01","name":"shell"}
+{"type":"tool_use_delta","id":"tu_01","json":"{\"command"}
 {"type":"result","stop":"tool_use","message":{"role":"assistant","content":[…]},
  "usage":{"input":812,"output":64,"cache_read":0,"cache_write":812}}
 ```
@@ -74,7 +74,7 @@ JSON lines on stdout: zero or more events, then exactly one terminal line,
 | Kernel rule | Effect |
 |---|---|
 | a line that is not valid JSON | dropped; `error` `{"where":"provider","message":"invalid line from provider"}` |
-| a line longer than `--max-line-bytes` | the provider is killed |
+| a line longer than 64 MiB | the provider is killed |
 | exit without a `result` | `run_end.reason: error`, unless inbox items are due (the run continues with them). Without an `error` line, the kernel sends `{"where":"provider","message":"provider exited without a result"}` |
 | a `result` after an `error` line | the `result` wins |
 
@@ -122,7 +122,7 @@ retrying a run the front end's.
 ### Abort: SIGTERM
 
 The kernel sends `SIGTERM` when a `now` item preempts the response or the run
-is aborted ([kernel.md: driver](kernel.md#driver)). Within 1 second the
+is aborted ([akern.md: abort](akern.md#abort)). Within 1 second the
 provider writes a `result` with `stop: "aborted"` and exits. Its `message` holds only
 complete text and thinking blocks that are valid to replay: never a `tool_use`
 block, even a complete one, and no thinking block that lacks what the API needs
@@ -141,19 +141,19 @@ typed content blocks. Other providers translate down from it.
 {"role":"assistant","content":[
   {"type":"thinking","thinking":"","signature":"…"},
   {"type":"text","text":"I'll look."},
-  {"type":"tool_use","id":"tu_01","name":"exec","input":{"argv":["ls"]}},
+  {"type":"tool_use","id":"tu_01","name":"shell","input":{"command":"ls"}},
   {"type":"tool_use","id":"tu_02","name":"read","input":{"path":"/p/README.md"}}]}
 
 {"role":"user","content":[
-  {"type":"tool_pending","tool_use_id":"tu_01","name":"exec","state":"running","pid":4242,
-   "out":"s.jsonl.d/calls/tu_01.out","err":"s.jsonl.d/calls/tu_01.err","stdin_open":false},
+  {"type":"tool_pending","tool_use_id":"tu_01","name":"shell","state":"running","pid":4242,
+   "out":"s.jsonl.d/calls/tu_01.out","stdin_open":false},
   {"type":"tool_result","tool_use_id":"tu_02","is_error":false,
    "content":[{"type":"text","text":"# agent\n…"}]},
   {"type":"text","text":"use the staging config"}]}
 
 {"role":"user","content":[
-  {"type":"job_result","tool_use_id":"tu_01","name":"exec","is_error":false,"status":"exit 0","ran":41,
-   "content":[{"type":"text","text":"{\"stdout\":\"…\",\"stderr\":\"\",\"exit\":0}"}]}]}
+  {"type":"job_result","tool_use_id":"tu_01","name":"shell","is_error":false,"status":"exit 0","ran":41,
+   "content":[{"type":"text","text":"…"}]}]}
 ```
 
 ### Blocks the kernel reads or writes
@@ -162,9 +162,9 @@ typed content blocks. Other providers translate down from it.
 |---|---|---|
 | `tool_use` | assistant | `id`, `name`, `input`: a JSON object; or, when the model's input text was not a JSON object, a string holding that text. Empty input is `{}` |
 | `tool_result` | user | `tool_use_id`, `is_error`, `content` (block array) |
-| `tool_pending` | user | `tool_use_id`, `name`, `state` (`waiting` for a `--max-processes` slot, or `running`); while its process runs also `pid`, `out`, `err` (its output files) and `stdin_open` |
+| `tool_pending` | user | `tool_use_id`, `name`, `state` (`running`); while its process runs also `pid`, `out` (its output file; sessions from before stderr was merged also have `err`) and `stdin_open` |
 | `job_result` | user | `tool_use_id`, `name`, `is_error`, `status` (`exit N`, `signal N`, `killed`, `not run`), `ran` (seconds since the program started, rounded; `0` if it never started), `content` (as a `tool_result` would carry it) |
-| `text`, `image`, `document` | user | built by the kernel from `send` content and tool results; media as `{"type":"image"\|"document","source":{"type":"base64","media_type":…,"data":…}}`. A `document` may carry `name`, the file's name: `read` sets it; `stdout_type` output has none |
+| `text`, `image`, `document` | user | built by the kernel from `send` content and tool results; media as `{"type":"image"\|"document","source":{"type":"base64","media_type":…,"data":…}}`. A `document` may carry `name`: `shell`'s `stdout_name` sets it |
 
 ### Ordering
 
@@ -200,11 +200,11 @@ errors. It keeps no table of models or of accepted media types
 
 ## 6. Shipped providers
 
-**Layout.** `providers/*.c` are the providers, one binary each.
-`providers/lib/` holds what they share: `provider.c` (the protocol side:
-request, lines, exit status, SIGTERM, the wording of pending calls and job
-results), `http.c` (libcurl: SSE streaming POST with retries and timeouts, and
-GET), `media.c` (media size limits, per-API), `messages.c` (the Anthropic
+**Layout.** `anthropic.c`, `claude-code.c`, `openai.c` and `mock.c` are the
+providers, one binary each. The rest of `providers/` is what they share:
+`provider.c` (the protocol side: request, lines, exit status, SIGTERM, the
+wording of pending calls and job results), `http.c` (libcurl: SSE streaming POST with retries and timeouts, and
+GET), `media.c` (media size limits, per-API), `anthropic_messages.c` (the Anthropic
 Messages format, used by `anthropic` and `claude-code`).
 
 ### anthropic
@@ -241,7 +241,7 @@ Rendering:
 
 | Block | Sent as |
 |---|---|
-| `tool_pending`, `state: running` | `tool_result`: `Still running in the background (pid N, its own process group); its output so far is in OUT and ERR. Its result arrives later as a message.`, plus `Its stdin is open: send it input with write and job "ID".` when `stdin_open` |
+| `tool_pending`, `state: running` | `tool_result`: `Still running in the background (pid N, its own process group); its output so far is in OUT and ERR. Its result arrives later as a message.`, plus `Its stdin is open: send it input with the job tool, id "ID".` when `stdin_open` |
 | `tool_pending`, any other state | `tool_result`: `Not finished yet; its result arrives later as a message.` |
 | `job_result` | a text block `<job call="…" name="…" status="…" ran="Ns">`, the result's text, `</job>`, with the result's non-text blocks after it |
 | adjacent user messages | merged; `tool_result` blocks first |
@@ -273,9 +273,9 @@ binary only and never touches Claude Code's credentials.
 |---|---|
 | isolation | Claude Code's own tools, CLAUDE.md files, memory, settings, skills, other MCP servers, compaction, advisor and session files are off: `--tools ""`, `--setting-sources ""`, `--disable-slash-commands`, `--strict-mcp-config`, `--no-session-persistence`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, `CLAUDE_CODE_DISABLE_ADVISOR_TOOL`, `DISABLE_COMPACT` |
 | environment | every `CLAUDE*` variable of a surrounding Claude Code session is removed, except `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` |
-| tools | served to `claude` over MCP by the provider itself, run as `claude-code --mcp TOOLS` (server `akern`), so the model calls them as `mcp__akern__exec` and so on. `--permission-mode dontAsk` refuses every call (a `tools/call` that arrives anyway gets `Not run: akern runs its tools itself.`) and `--max-turns 1` ends the turn after the first response, so `tool_use` blocks come back unrun; the provider strips the prefix from them and adds it to earlier ones in the history |
+| tools | served to `claude` over MCP by the provider itself, run as `claude-code --mcp TOOLS` (server `akern`), so the model calls them as `mcp__akern__shell` and so on. `--permission-mode dontAsk` refuses every call (a `tools/call` that arrives anyway gets `Not run: akern runs its tools itself.`) and `--max-turns 1` ends the turn after the first response, so `tool_use` blocks come back unrun; the provider strips the prefix from them and adds it to earlier ones in the history |
 | history | rendered as `anthropic` renders it, media size limits included, and written as `--input-format stream-json` lines, every user message but the last with `shouldQuery: false`. `claude` appends an assistant message as soon as it reads it but queues user messages, so the provider writes past a queued one only after `claude` acknowledges it with a `result` line; no acknowledgement within 60 s fails with `claude did not take in the conversation` |
-| stream | `--include-partial-messages` carries the API's stream events (those of nested agents ignored), read by the same parser as `anthropic` (`providers/lib/messages.c`) |
+| stream | `--include-partial-messages` carries the API's stream events (those of nested agents ignored), read by the same parser as `anthropic` (`providers/anthropic_messages.c`) |
 | failure | no `message_stop`: an `error` whose message is the turn's result text, its first error, or how `claude` exited; `kind` from `api_error_status` and the text as in `anthropic` (a message naming `/login` is `auth`). Never `invalid_block`: for a rejected image or document the result line carries Claude Code's own wording (`Image was too large…`), not the API's, so it names no block |
 | abort | `SIGTERM` stops `claude`; the result is `aborted` |
 
@@ -358,7 +358,7 @@ text block, and the first text of its first `tool_result` or `job_result`):
 
 | Last text | Response |
 |---|---|
-| starts with `!` | one assistant message of calls, `stop: tool_use`. The rest is split on `;`; a part `@NAME JSON` is a `tool_use` of `NAME` with that input (`{}` when empty), any other part `exec` with `["sh","-c",PART]`. Ids are `tu_<pid>_<n>` |
+| starts with `!` | one assistant message of calls, `stop: tool_use`. The rest is split on `;`; a part `@NAME JSON` is a `tool_use` of `NAME` with that input (`{}` when empty), any other part a `shell` call with `{"command":PART}`. Ids are `tu_<pid>_<n>` |
 | anything else | streamed as 8-byte `text_delta`s, `stop: end_turn`: `The tool said: R` (the first 400 bytes of the result text) plus ` (and you said: T)` when there is text too; otherwise `echo: T` |
 
 With `MOCK_SCRIPT=path`, the file is JSON lines. A group is the lines up to

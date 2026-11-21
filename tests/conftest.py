@@ -15,6 +15,10 @@ from invariants import event_violations, session_violations
 REPO = Path(__file__).resolve().parent.parent
 BUILD = Path(os.environ.get("AKERN_BUILD", REPO / "build"))
 
+# Seconds to wait for anything before calling it hung. No test measures speed: a loaded
+# machine is slow, not wrong, and these budgets exist only so that a hang fails.
+PATIENCE = 30.0
+
 
 def tool(name, **input):
     """A prompt line that makes the mock model call one tool: `!@name {input}`."""
@@ -22,7 +26,7 @@ def tool(name, **input):
 
 
 def shell(*commands):
-    """A prompt line that makes the mock model exec each command with `sh -c`, all at once."""
+    """A prompt line that makes the mock model make one shell call per command, all at once."""
     return _calls(*commands)
 
 
@@ -61,7 +65,7 @@ def signal_when(*steps):
     return send
 
 
-def wait_for(condition, timeout=5.0):
+def wait_for(condition, timeout=PATIENCE):
     """Poll until `condition()` returns something truthy, and return it."""
     deadline = time.monotonic() + timeout
     while not (value := condition()):
@@ -73,10 +77,11 @@ def wait_for(condition, timeout=5.0):
 class Run:
     """One akern run: its session log, its event stream, and readings of both."""
 
-    def __init__(self, session, printing):
+    def __init__(self, session, printing, name=None):
         self.session = session
-        self.events_path = session.with_suffix(".events")
-        self.stderr_path = session.with_suffix(".stderr")
+        name = name or session
+        self.events_path = name.with_suffix(".events")
+        self.stderr_path = name.with_suffix(".stderr")
         self.printing = printing
 
     @property
@@ -94,7 +99,7 @@ class Run:
 
     @property
     def entries(self):
-        return _read_jsonl(self.session)
+        return _read_jsonl(self.session, skip_invalid=True)
 
     def events_of(self, type):
         return [e for e in self.events if e["type"] == type]
@@ -129,8 +134,8 @@ class Run:
         return self.result_texts[0]
 
     @property
-    def result_json(self):
-        return json.loads(self.result_text)
+    def shell_result(self):
+        return parse_shell(self.result_text)
 
     @property
     def replies(self):
@@ -142,13 +147,13 @@ class Run:
 
     @property
     def job_reports(self):
-        """Late results of pending calls, as (block, its text parsed as JSON when it is JSON) pairs."""
+        """Late results of pending calls, as (block, its text read by parse_shell when it has a header) pairs."""
         late = [b for m in self.messages for b in _blocks(m) if b["type"] == "job_result"]
-        return [(b, _json_or_text(b["content"][0]["text"])) for b in late]
+        return [(b, _shell_or_text(b["content"][0]["text"])) for b in late]
 
     def violations(self):
         sessions = [self.session, *self.session.parent.glob("agents/*.jsonl")]
-        found = [f"{s.name}: {v}" for s in sessions for v in session_violations(_read_jsonl(s))]
+        found = [f"{s.name}: {v}" for s in sessions for v in session_violations(_read_jsonl(s, skip_invalid=True))]
         if not self.printing:
             found += [f"{self.events_path.name}: {v}" for v in event_violations(self.events)]
         return found
@@ -163,7 +168,8 @@ class Kernel:
         self.env = env
         self.runs = 0
 
-    def __call__(self, prompt=None, *args, later=(), env=None, during=None, timeout=10, code=0):
+    def __call__(self, prompt=None, *args, later=(), env=None, during=None, timeout=PATIENCE, code=0,
+                 session=None, model="mock/echo"):
         """Run the kernel with `prompt` as the first stdin line and wait for it to exit with `code`.
 
         later:  (when, line) pairs: each line is written `when` seconds after the one before, or,
@@ -171,10 +177,12 @@ class Kernel:
                 that is a function is given the Run;
                 stdin closes after the last.
         during: a function given the Run, called in a thread while the kernel runs.
+        session: an earlier run's session file, to resume it; model: None leaves out -m.
         """
         self.runs += 1
-        run = Run(self.dir / f"run{self.runs}.jsonl", printing="-p" in args)
-        argv = ["akern", "-m", "mock/echo", "-s", str(run.session), *args]
+        name = self.dir / f"run{self.runs}.jsonl"
+        run = Run(session or name, printing="-p" in args, name=name)
+        argv = ["akern", *(["-m", model] if model else []), "-s", str(run.session), *args]
         with open(run.events_path, "w") as out, open(run.stderr_path, "w") as err:
             proc = subprocess.Popen(argv, cwd=self.dir, env={**self.env, "TMPDIR": str(self.dir), **(env or {})},
                                     stdin=subprocess.PIPE, stdout=out, stderr=err, text=True)
@@ -291,18 +299,55 @@ def _start(target, *args):
     return thread
 
 
-def _read_jsonl(path):
+def _read_jsonl(path, skip_invalid=False):
+    """Complete lines as JSON; skip_invalid drops lines that do not parse, as the kernel does in a
+    session file."""
     if not path.exists():
         return []
-    lines = path.read_text().splitlines(keepends=True)
-    return [json.loads(line) for line in lines if line.endswith("\n")]
+    lines = [line for line in path.read_text().splitlines(keepends=True) if line.endswith("\n")]
+    return [v for v in map(_parse_or_none if skip_invalid else json.loads, lines) if v is not None]
 
 
-def _json_or_text(text):
+def _parse_or_none(line):
     try:
-        return json.loads(text)
-    except ValueError:
-        return text
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
+_HEADER = re.compile(r"\[([^\n]*)\]")
+_ENDING = re.compile(r"(?:(killed)(?:: output over \d+ bytes)?, )?(exit|signal) (\d+)")
+_CUT = re.compile(r"cut at (\d+) of (\d+) bytes, (?:all of it in (.+)|saving all of it to (.+) failed: (.+))")
+_HIDDEN = re.compile(r"(\d+) bytes of (.+) not shown(?:, (?:all of it in (.+)|saving all of it to (.+) failed: (.+)))?")
+
+
+def parse_shell(text):
+    """A shell result's text as a dict: output, exit (or signal), and when they apply killed,
+    total and file (cut or not shown), file_error, and hidden (what was not shown)."""
+    header, _, output = text.partition("\n")
+    match = _HEADER.fullmatch(header)
+    assert match, f"no header line: {text[:200]!r}"
+    result = {"output": output}
+    ending, *parts = match.group(1).split("; ")
+    killed, kind, n = _ENDING.fullmatch(ending).groups()
+    result[kind] = int(n)
+    if killed:
+        result["killed"] = True
+    for part in parts:
+        if cut := _CUT.fullmatch(part):
+            _, total, file, failed_file, error = cut.groups()
+        elif hidden := _HIDDEN.fullmatch(part):
+            total, result["hidden"], file, failed_file, error = hidden.groups()
+        else:
+            raise AssertionError(f"unknown header part: {part!r}")
+        result["total"], result["file"] = int(total), file or failed_file
+        if error:
+            result["file_error"] = error
+    return result
+
+
+def _shell_or_text(text):
+    return parse_shell(text) if _HEADER.fullmatch(text.partition("\n")[0]) else text
 
 
 def _blocks(message):

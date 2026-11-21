@@ -2,23 +2,25 @@ import json
 import os
 import signal
 
-from conftest import seen, seen_pending, send_now, tool, parallel, wait_for
+import pytest
+
+from conftest import PATIENCE, seen, seen_pending, send_now, tool, parallel, wait_for
 
 
 def test_a_call_not_waited_for_is_pending_and_its_result_wakes_the_agent_after_eof(kernel):
-    run = kernel(tool("exec", argv=["sleeper", "0.3"], wait=False))
+    run = kernel(tool("shell", command="sleeper 0.3", wait=0))
     [pending] = run.pending
     assert pending["pid"] > 0
     [(late, result)] = run.job_reports
     assert (late["tool_use_id"], late["status"]) == (pending["tool_use_id"], "exit 0")
-    assert result["stdout"] == "slept 0.3 seconds\n"
+    assert result["output"] == "sleeping 0.3\nslept 0.3 seconds\n"
     assert run.replies[-1].startswith("The tool said:")
 
 
 def test_send_now_preempts_a_stream_keeping_the_partial_text(kernel, script):
     env = script(
         {"type": "text_delta", "text": "I'll rename the module and then "},
-        {"x-sleep": 5},
+        {"x-sleep": PATIENCE},  # a window for the send; the preemption ends it
         {"type": "text_delta", "text": "never reached"},
         {"type": "result", "stop": "end_turn",
          "message": {"role": "assistant", "content": [{"type": "text", "text": "never reached"}]}},
@@ -42,35 +44,81 @@ def test_a_line_typed_while_calls_run_is_answered_at_once_and_their_results_arri
         for gate in gates:
             gate.write_text(f"released {gate.name}\n")
 
-    run = kernel(parallel(*(tool("exec", argv=["gate", str(gate)]) for gate in gates)),
+    run = kernel(parallel(*(tool("shell", command=f"gate {gate}") for gate in gates)),
                  later=[(seen("tool_progress", 2), "skip it")], during=release_gates)
     assert len(run.pending) == 2 and not run.tool_results
     assert "echo: skip it" in run.replies
-    assert sorted(result["stdout"] for _, result in run.job_reports) == ["released gate-a\n", "released gate-b\n"]
+    assert sorted(result["output"].splitlines()[-1] for _, result in run.job_reports) == ["released gate-a", "released gate-b"]
 
 
 def test_a_job_killed_by_its_process_group_still_reports(kernel):
     def kill_the_job(run):
         [pending] = wait_for(lambda: run.pending)
+        wait_for(lambda: run.events_of("tool_progress"))  # running: not still inside exec
         os.killpg(pending["pid"], signal.SIGTERM)
 
-    run = kernel(tool("exec", argv=["sh", "-c", "sleep 30 & wait"], wait=False), during=kill_the_job)
+    run = kernel(tool("shell", command="echo ready >&2 && sleep 30 & wait", wait=0), during=kill_the_job)
     [(_, result)] = run.job_reports
     assert result["signal"] == signal.SIGTERM
 
 
-def test_stdin_then_writes_then_close_reach_the_program_in_order(kernel):
-    run = kernel(tool("exec", argv=["sed", "s/^/got:/"], stdin="one\n", stdin_open=True, wait=False),
-                 later=[(seen_pending(), lambda run: tool("write", job=run.pending[0]["tool_use_id"],
-                                                          content="two\n", close=True))])
+def test_stdin_then_job_stdin_then_eof_reach_the_program_in_order(kernel):
+    run = kernel(tool("shell", command="sed s/^/got:/", stdin="one\n", eof=False, wait=0),
+                 later=[(seen_pending(), lambda run: tool("job", id=run.pending[0]["tool_use_id"],
+                                                          stdin="two\n", eof=True))])
+    job_id = run.pending[0]["tool_use_id"]
     assert run.pending[0]["stdin_open"] is True
+    assert run.result_texts == [f"{job_id}: wrote 4 bytes to its stdin, closed its stdin."]
     [(_, result)] = run.job_reports
-    assert result["stdout"] == "got:one\ngot:two\n"
+    assert result["output"] == "got:one\ngot:two\n"
+
+
+def test_a_shell_call_whose_wait_runs_out_becomes_a_job(kernel):
+    run = kernel(tool("shell", command="sleep 0.5 && echo done", wait=0.1))
+    assert len(run.pending) == 1 and not run.tool_results
+    [(_, result)] = run.job_reports
+    assert result["output"] == "done\n"
+
+
+def test_job_signals_the_jobs_process_group_and_its_result_still_arrives(kernel):
+    run = kernel(tool("shell", command="sleep 30 & wait", wait=0),
+                 later=[(seen_pending(), lambda run: tool("job", id=run.pending[0]["tool_use_id"], signal="TERM"))])
+    assert run.result_texts == [f"{run.pending[0]['tool_use_id']}: sent it SIGTERM."]
+    [(_, result)] = run.job_reports
+    assert result["signal"] == signal.SIGTERM
+
+
+def test_job_wait_runs_out_or_ends_with_the_job_whose_result_comes_in_the_same_message(kernel):
+    def job_call(**input):
+        return lambda run: tool("job", id=run.pending[0]["tool_use_id"], **input)
+
+    run = kernel(tool("shell", command="sleep 30", wait=0),
+                 later=[(seen_pending(), job_call(wait=0.2)), (seen("tool_end"), job_call(signal="TERM", wait=5))])
+    job_id = run.pending[0]["tool_use_id"]
+    assert run.result_texts == [f"{job_id} still running after 0.2 s.",
+                                f"{job_id}: sent it SIGTERM; ended: signal {signal.SIGTERM}."]
+    [(_, result)] = run.job_reports
+    assert result["signal"] == signal.SIGTERM
+    [together] = [m for m in run.messages if any(b.get("type") == "job_result" for b in m["content"])]
+    assert [b["type"] for b in together["content"]] == ["tool_result", "job_result"]
+
+
+@pytest.mark.parametrize("input, reply", [
+    ({"id": "nope"}, '"nope" is not a running job.'),
+    ({"signal": "BOGUS"}, "Unknown signal: BOGUS"),
+    ({"stdin": "x"}, "The stdin of {id} is closed."),
+    ({}, "{id} is running."),
+])
+def test_job_reports_on_a_job_or_refuses(kernel, input, reply):
+    run = kernel(tool("shell", command="sleep 30", wait=0),
+                 later=[(seen_pending(), lambda run: tool("job", **{"id": run.pending[0]["tool_use_id"], **input})),
+                        (seen("tool_end"), lambda run: tool("job", id=run.pending[0]["tool_use_id"], signal="KILL"))])
+    assert run.result_texts[0] == reply.format(id=run.pending[0]["tool_use_id"])
 
 
 def test_a_line_typed_during_the_stream_waits_for_the_calls_and_goes_with_their_results(kernel, script, tmp_path):
     gate = tmp_path / "gate"
-    call = {"type": "tool_use", "id": "hi", "name": "exec", "input": {"argv": ["echo", "hi"]}}
+    call = {"type": "tool_use", "id": "hi", "name": "shell", "input": {"command": "echo hi"}}
     env = script(
         {"type": "text_delta", "text": "running it"},
         {"x-wait": str(gate)},
@@ -81,18 +129,16 @@ def test_a_line_typed_during_the_stream_waits_for_the_calls_and_goes_with_their_
                  during=lambda run: wait_for(lambda: seen("queued", 2)(run)) and gate.write_text(""))
     assert not run.pending
     [result] = run.tool_results
-    assert json.loads(result["content"][0]["text"])["stdout"] == "hi\n"
+    assert result["content"][0]["text"] == "[exit 0]\nhi\n"
     [delivery] = [m for m in run.messages if any(b.get("type") == "tool_result" for b in m["content"])]
     assert delivery["content"][1:] == [{"type": "text", "text": "also this"}]
 
 
-def test_killing_a_job_still_waiting_for_a_slot_means_it_never_runs(kernel, tmp_path):
+def test_an_exec_past_max_processes_fails_at_once_and_never_runs(kernel, tmp_path):
     gate = tmp_path / "gate"
-    run = kernel(parallel(tool("exec", argv=["gate", str(gate)]), tool("exec", argv=["sleeper", "0"], wait=False)),
+    run = kernel(parallel(tool("shell", command=f"gate {gate}"), tool("shell", command="sleeper 0")),
                  "--max-processes", "1",
-                 later=[(seen("tool_start", 2), lambda run: json.dumps({"type": "kill", "job": run.calls[1], "ref": 1}))],
-                 during=lambda run: wait_for(lambda: run.events_of("ok")) and gate.write_text("released\n"))
-    assert run.events_of("ok") == [{"type": "ok", "ref": 1}]
-    assert [e["call"] for e in run.events_of("tool_progress")] == [run.calls[0]]
-    assert run.result_texts[1] == "Not run: killed before it started."
+                 during=lambda run: wait_for(lambda: run.events_of("tool_end")) and gate.write_text("released\n"))
+    assert run.result_texts[1] == "Not run: already at the --max-processes limit (1)."
     assert [e["status"] for e in run.events_of("tool_end")] == ["not run", "done"]
+    assert {e["call"] for e in run.events_of("tool_progress")} == {run.calls[0]}

@@ -1,6 +1,6 @@
 CC         ?= cc
 CFLAGS     ?= -std=c99 -O2 -g -Wall -Wextra -Wpedantic
-CPPFLAGS   += -D_XOPEN_SOURCE=700 -Isrc
+CPPFLAGS   += -D_XOPEN_SOURCE=700 -Ishared
 PREFIX     ?= /usr/local
 AKERN_HOME ?= $(HOME)/.akern
 
@@ -11,16 +11,16 @@ OBJ        = $(BUILD_ROOT)/obj
 BIN        = $(BUILD_ROOT)/bin
 SYSTEM     = $(BUILD_ROOT)/system
 
-KERNEL     = $(patsubst %,$(OBJ)/src/%.o,main loop driver calls files inbox proc ctl sink session msg json base)
-SHARED     = $(OBJ)/src/json.o $(OBJ)/src/base.o
+SHARED     = $(OBJ)/shared/json.o $(OBJ)/shared/bytes.o
+KERNEL     = $(patsubst %,$(OBJ)/akern/%.o,main loop input turns calls tools inbox proc session output message) $(SHARED)
 FILE_TOOLS = $(BIN)/akern-edit
-PROVIDERS  = $(patsubst providers/%.c,$(SYSTEM)/providers/%,$(wildcard providers/*.c))
-PROTOCOL   = $(OBJ)/providers/lib/provider.o $(SHARED)
-MESSAGES   = $(OBJ)/providers/lib/messages.o $(OBJ)/providers/lib/media.o $(PROTOCOL)
-HTTP       = $(OBJ)/providers/lib/http.o $(PROTOCOL)
+PROVIDERS  = $(patsubst %,$(SYSTEM)/providers/%,mock anthropic claude-code openai)
+PROTOCOL   = $(OBJ)/providers/provider.o $(SHARED)
+ANTHROPIC  = $(OBJ)/providers/anthropic_messages.o $(OBJ)/providers/media.o $(PROTOCOL)
+HTTP       = $(OBJ)/providers/http.o $(PROTOCOL)
 SCRIPTS    = $(patsubst tools/%,$(BIN)/%,$(filter-out %.c,$(wildcard tools/akern-*)))
 SKILLS     = $(patsubst %,$(SYSTEM)/%,$(wildcard skills/*/*))
-DATA       = $(SKILLS) $(SYSTEM)/render.jq $(SYSTEM)/prompt $(SYSTEM)/README.md
+DATA       = $(SKILLS) $(SYSTEM)/render.jq $(SYSTEM)/system-prompt $(SYSTEM)/base-prompt.md $(SYSTEM)/tools.json $(SYSTEM)/README.md
 PROGRAMS   = $(BIN)/akern $(FILE_TOOLS)
 VENV       = build/venv
 PYTEST     = $(VENV)/bin/pytest
@@ -41,18 +41,20 @@ $(FILE_TOOLS): $(BIN)/%: $(OBJ)/tools/%.o
 $(SYSTEM)/providers/mock: $(OBJ)/providers/mock.o $(PROTOCOL)
 	$(LINK) $^
 
-$(SYSTEM)/providers/anthropic: $(OBJ)/providers/anthropic.o $(MESSAGES) $(HTTP)
+$(SYSTEM)/providers/anthropic: $(OBJ)/providers/anthropic.o $(ANTHROPIC) $(HTTP)
 	$(LINK) $^ -lcurl
 
-$(SYSTEM)/providers/claude-code: $(OBJ)/providers/claude-code.o $(MESSAGES)
+$(SYSTEM)/providers/claude-code: $(OBJ)/providers/claude-code.o $(ANTHROPIC)
 	$(LINK) $^
 
-$(SYSTEM)/providers/openai: $(OBJ)/providers/openai.o $(OBJ)/providers/lib/media.o $(HTTP)
+$(SYSTEM)/providers/openai: $(OBJ)/providers/openai.o $(OBJ)/providers/media.o $(HTTP)
 	$(LINK) $^ -lcurl
 
-$(patsubst %.c,$(OBJ)/%.o,$(wildcard providers/*.c providers/lib/*.c)): $(wildcard providers/lib/*.h)
+$(patsubst %.c,$(OBJ)/%.o,$(wildcard akern/*.c)): $(wildcard akern/*.h)
 
-$(OBJ)/%.o: %.c src/*.h
+$(patsubst %.c,$(OBJ)/%.o,$(wildcard providers/*.c)): $(wildcard providers/*.h)
+
+$(OBJ)/%.o: %.c shared/*.h
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
@@ -65,8 +67,18 @@ $(SKILLS): $(SYSTEM)/%: %
 $(SYSTEM)/render.jq: tools/render.jq
 	$(COPY)
 
-$(SYSTEM)/prompt: tools/prompt
+$(SYSTEM)/system-prompt: tools/system-prompt
 	$(COPY)
+
+$(SYSTEM)/base-prompt.md: tools/base-prompt.md
+	$(COPY)
+
+# The shell tool runs bash; where there is none, sh, and its description says so.
+$(SYSTEM)/tools.json: tools/tools.json
+	@mkdir -p $(@D)
+	@if command -v bash >/dev/null 2>&1; then cp -p $< $@; \
+	else sed -e 's/"program": "bash"/"program": "sh"/' -e 's/Run a command with bash /Run a command with sh /' $< > $@; \
+	echo "no bash on PATH: $@ runs sh"; fi
 
 $(SYSTEM)/README.md: home/README.md
 	$(COPY)
@@ -84,16 +96,13 @@ $(PYTEST):
 test: all $(PYTEST)
 	AKERN_BUILD=$(abspath $(BUILD_ROOT)) PYTHONDONTWRITEBYTECODE=1 $(PYTEST) -q -p no:cacheprovider tests
 
-lines:
-	@wc -l $(patsubst $(OBJ)/%.o,%.c,$(KERNEL)) src/*.h | tail -1
-
 install: all
 	$(NOT_BUILD)
 	mkdir -p $(PREFIX)/bin $(AKERN_HOME)
 	cp -p $(PROGRAMS) $(SCRIPTS) $(PREFIX)/bin/
 	rm -rf $(AKERN_HOME)/system
 	cp -pR $(SYSTEM) $(AKERN_HOME)/system
-	@cd $(AKERN_HOME) && for f in providers/* render.jq prompt; do [ -e "system/$$f" ] || continue; \
+	@cd $(AKERN_HOME) && for f in providers/* render.jq system-prompt base-prompt.md tools.json; do [ -e "system/$$f" ] || continue; \
 	    if [ ! -L "$$f" ] && cmp -s "$$f" "system/$$f"; then rm "$$f" && echo "removed $(AKERN_HOME)/$$f: same as the built-in"; \
 	    elif [ -e "$$f" ]; then echo "note: $(AKERN_HOME)/$$f overrides the built-in"; fi; done; true
 
@@ -106,4 +115,4 @@ uninstall:
 clean:
 	rm -rf $(BUILD_ROOT) 2>/dev/null || rm -rf $(BUILD_ROOT)
 
-.PHONY: all asan test lines install uninstall clean
+.PHONY: all asan test install uninstall clean

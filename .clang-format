@@ -1,0 +1,53 @@
+# C style for akern/, shared/, providers/ and tools/; docs/style.md explains the rules.
+# Needs clang-format 21 or later. LLVM defaults except where noted.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+
+# Braces on their own line for functions and control flow; on the same line for
+# struct, union and enum. A single-statement body may skip braces, but it always
+# goes on its own, indented line.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel: true
+  AfterControlStatement: Always
+  AfterEnum: false
+  AfterExternBlock: true
+  AfterFunction: true
+  AfterStruct: false
+  AfterUnion: false
+  BeforeElse: true
+  BeforeWhile: false
+  IndentBraces: false
+  SplitEmptyFunction: true
+  SplitEmptyRecord: true
+InsertBraces: false
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortCaseLabelsOnASingleLine: false
+
+# A bracket that has to split breaks right after it opens, indents its contents
+# once, and closes on its own line at the indent of the line that opened it:
+# calls, signatures, braced lists and if/loop/switch conditions alike.
+# Parameters, arguments and list items that do not fit on one line go one per line.
+AlignAfterOpenBracket: false
+BreakAfterOpenBracketFunction: true
+BreakBeforeCloseBracketFunction: true
+BreakAfterOpenBracketBracedList: true
+BreakBeforeCloseBracketBracedList: true
+BreakAfterOpenBracketIf: true
+BreakBeforeCloseBracketIf: true
+BreakAfterOpenBracketLoop: true
+BreakBeforeCloseBracketLoop: true
+BreakAfterOpenBracketSwitch: true
+BreakBeforeCloseBracketSwitch: true
+PackParameters:
+  BinPack: OnePerLine
+AllowAllParametersOfDeclarationOnNextLine: false
+PackArguments:
+  BinPack: OnePerLine
+AllowAllArgumentsOnNextLine: false
+# Keep the return type on the name's line; break the parameters instead.
+PenaltyReturnTypeOnItsOwnLine: 1000

@@ -1,0 +1,83 @@
+#!/bin/sh
+export LC_ALL=C
+# Shipped as HOME/system/system-prompt: that HOME, however it is run (./build/system/system-prompt
+# renders build's prompt). A copy elsewhere uses $AKERN_HOME, else ~/.akern.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit
+case $here in
+?*/system) home=${here%/system} ;;
+*) home=$(CDPATH= cd -- "${AKERN_HOME:-$HOME/.akern}" && pwd) || exit ;;
+esac
+started=
+
+section() {
+    if [ -n "$started" ]; then echo; fi
+    started=1
+}
+
+put() {
+    cat "$1" || exit
+    if [ -n "$(tail -c 1 "$1")" ]; then echo; fi
+}
+
+field() {
+    awk -v key="$1:" 'NR == 1 { if ($0 != "---") exit; next }
+        $0 == "---" { exit }
+        index($0, key) == 1 { value = substr($0, length(key) + 1); sub(/^ +/, "", value); print value; exit }' "$2"
+}
+
+skills() {
+    for file in "$1"/*/SKILL.md; do
+        dir=${file%/SKILL.md}
+        if [ -f "$file" ] && { [ -z "$2" ] || [ ! -d "$2/${dir##*/}" ]; }; then
+            name=$(field name "$file")
+            printf '%s\n' "- ${name:-${dir##*/}}: $(field description "$file") ($file)"
+        fi
+    done
+}
+
+base=$home/base-prompt.md
+if [ ! -f "$base" ]; then base=$home/system/base-prompt.md; fi
+if [ -s "$base" ]; then
+    section
+    put "$base"
+fi
+
+dir=$PWD
+dirs=$dir
+while [ ! -e "$dir/.git" ] && [ "$dir" != / ]; do
+    dir=$(dirname "$dir")
+    dirs="$dir
+$dirs"
+done
+root=
+if [ -e "$dir/.git" ]; then root=$dir; else dirs=$PWD; fi
+
+section
+printf 'Your working directory is %s.\n' "$PWD"
+if [ -n "$root" ]; then printf 'It is in the git repository %s.\n' "$root"; fi
+printf "Today's date is %s.\n" "$(date +%Y-%m-%d)"
+printf 'The system is %s.\n' "$(uname -sr)"
+
+if [ -s "$home/system.md" ]; then
+    section
+    put "$home/system.md"
+fi
+
+list=$(skills "$home/skills"; skills "$home/system/skills" "$home/skills")
+if [ -n "$list" ]; then
+    section
+    printf "Skills: read a skill's file before relying on it.\n%s\n" "$list"
+fi
+
+set -f
+IFS='
+'
+for dir in $dirs; do
+    file=${dir%/}/AGENTS.md
+    if [ ! -f "$file" ]; then file=${dir%/}/CLAUDE.md; fi
+    if [ -s "$file" ]; then
+        section
+        printf '# %s\n\n' "$file"
+        put "$file"
+    fi
+done

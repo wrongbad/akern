@@ -105,3 +105,14 @@ def test_a_block_that_is_no_longer_media_is_not_replaced_again(kernel, home, tmp
                  "-m", "strict/x", env=strict(home, tmp_path, STRICT_SAME="1"), code=1)
     assert len(run.entries_of("replace")) == 1
     assert run.events_of("run_end")[0]["reason"] == "error"
+
+
+def test_a_torn_last_line_does_not_swallow_the_next_entry(kernel, home):
+    first = kernel("one", env=home.env)
+    with open(first.session, "a") as f:
+        f.write('{"type":"message","id":"torn01","parent":null,"mess')
+    kernel("two", env=home.env, session=first.session)
+    kernel("three", env=home.env, session=first.session)
+    user_texts = [m["content"][0]["text"] if isinstance(m["content"], list) else m["content"]
+                  for m in home.requests[-1]["messages"] if m["role"] == "user"]
+    assert user_texts == ["one", "two", "three"]

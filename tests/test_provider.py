@@ -1,4 +1,4 @@
-from conftest import seen
+from conftest import PATIENCE, seen
 
 
 def answer(text):
@@ -12,10 +12,13 @@ def test_a_result_after_a_provider_error_line_wins_and_the_run_ends_done(kernel,
     assert run.replies == ["recovered"]
 
 
-def test_a_provider_line_longer_than_max_line_bytes_is_dropped_whole(kernel, script):
-    run = kernel("hi", "--max-line-bytes", "1000", env=script({"type": "text_delta", "text": "x" * 200_000}, answer("ok")))
+def test_a_provider_line_longer_than_64_mib_is_dropped_whole_and_the_provider_stopped(kernel, script):
+    long_line = {"type": "tool_use_delta", "id": "tu_1", "json": "x" * (64 << 20)}  # not echoed when aborted
+    run = kernel("hi", env=script(long_line, {"x-sleep": PATIENCE}, answer("never sent")))
+    assert not run.events_of("tool_use_delta")
     assert not run.events_of("error")
-    assert run.streamed == ""
+    assert run.replies == []
+    assert [e["reason"] for e in run.events_of("run_end")] == ["done"]
 
 
 def test_a_param_is_sent_as_json_when_it_parses_and_as_a_string_otherwise(kernel, home):
@@ -37,21 +40,21 @@ def test_a_provider_in_akern_home_shadows_the_one_of_the_same_name_in_system(ker
     assert run.events_of("run_end")[0]["reason"] == "done"
 
 
-def test_the_system_prompt_is_the_output_of_the_first_prompt_program_and_null_when_empty_or_missing(kernel, home):
-    program = home.dir / "prompt"
+def test_the_system_prompt_is_the_output_of_the_first_system_prompt_program_and_null_when_empty_or_missing(kernel, home):
+    program = home.dir / "system-prompt"
     program.write_text("#!/bin/sh\necho from home\n")
     program.chmod(0o755)
     kernel("hi", env=home.env)
     program.write_text("#!/bin/sh\n")
     kernel("hi", env=home.env)
     program.unlink()
-    (home.dir / "system" / "prompt").unlink()
+    (home.dir / "system" / "system-prompt").unlink()
     kernel("hi", env=home.env)
     assert [r["system"] for r in home.requests] == ["from home\n", None, None]
 
 
-def test_s_reads_its_file_once_and_skips_the_prompt_program(kernel, home, tmp_path):
-    program = home.dir / "prompt"
+def test_s_reads_its_file_once_and_skips_the_system_prompt_program(kernel, home, tmp_path):
+    program = home.dir / "system-prompt"
     program.write_text(f"#!/bin/sh\ntouch {tmp_path / 'ran'}\n")
     program.chmod(0o755)
     chosen = tmp_path / "chosen.md"
@@ -68,8 +71,8 @@ def test_an_unreadable_s_file_stops_the_kernel_before_it_starts(kernel, home):
     assert not home.requests and not run.session.exists()
 
 
-def test_a_failing_prompt_program_stops_the_kernel_before_it_starts(kernel, home):
-    program = home.dir / "prompt"
+def test_a_failing_system_prompt_program_stops_the_kernel_before_it_starts(kernel, home):
+    program = home.dir / "system-prompt"
     program.write_text("#!/bin/sh\necho partial\necho broken >&2\nexit 3\n")
     program.chmod(0o755)
     run = kernel("hi", env=home.env, code=2)

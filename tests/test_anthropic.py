@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from conftest import BUILD
+from conftest import BUILD, PATIENCE
 
 PROVIDER = BUILD / "system" / "providers" / "anthropic"
 
@@ -63,7 +63,7 @@ def api():
         request = {"model": "claude-opus-5-5", "system": "", "messages": [], "tools": [], "params": params or {}}
         raw = messages if isinstance(messages, str) else json.dumps(messages)
         stdin = json.dumps(request).replace('"messages": []', '"messages": ' + raw)
-        done = subprocess.run([PROVIDER, *args], input=stdin, env=env, capture_output=True, text=True, timeout=30)
+        done = subprocess.run([PROVIDER, *args], input=stdin, env=env, capture_output=True, text=True, timeout=PATIENCE)
         return done.returncode, [json.loads(line) for line in done.stdout.splitlines()], seen[:]
 
     def send(messages, stream=STREAM, params=None):
@@ -124,7 +124,7 @@ def test_a_pending_call_is_answered_with_where_its_process_and_output_are(api):
     assert answer == {"type": "tool_result", "tool_use_id": "tu_1", "content": [text(
         "Still running in the background (pid 4242, its own process group); its output so far is in "
         "/p/s.jsonl.d/calls/tu_1.out and /p/s.jsonl.d/calls/tu_1.err. Its result arrives later as a message. "
-        'Its stdin is open: send it input with write and job "tu_1".')]}
+        'Its stdin is open: send it input with the job tool, id "tu_1".')]}
 
 
 @pytest.mark.parametrize("state", ["waiting", None])

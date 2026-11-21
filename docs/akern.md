@@ -1,8 +1,8 @@
 # akern
 
 The kernel as a command: what it reads, what it writes, and the files it
-keeps. How it behaves inside (delivery modes, the wake rule, jobs) is
-[kernel.md](kernel.md); what it says to a provider is
+keeps. How it is built is in the comments of the headers in
+[`akern/`](../akern); what it says to a provider is
 [providers.md](providers.md); the model's tools are [tools.md](tools.md).
 
 ## Conventions
@@ -25,28 +25,28 @@ session file.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AKERN_HOME` | `$HOME/.akern` (`./.akern` without `HOME`) | user layer: `providers/<name>` and `prompt`, preferred over the same names in `$AKERN_HOME/system/` (the layer `make install` writes) |
-| `AKERN_MODEL` | none | `provider/model` when `-m` is absent. Neither given: exit 2. The kernel never reads `$AKERN_HOME/model`; the `akern-cli` front end turns it into this variable ([tools.md §4](tools.md#4-the-akern-cli-front-end)) |
-| `AKERN_RECURSION_LIMIT` | `4` | kernels that may still nest, this one included. `0`, negative or non-numeric: exit 2 |
+| `AKERN_HOME` | `$HOME/.akern` (`./.akern` without `HOME`) | user layer: `providers/<name>` and `system-prompt`, preferred over the same names in `$AKERN_HOME/system/` (the layer `make install` writes) |
+| `AKERN_MODEL` | none | `provider/model` when `-m` is absent ([settings](#settings)). Neither given, and no model in the session: exit 2. The kernel never reads `$AKERN_HOME/model`; the `akern-cli` front end turns it into this variable ([tools.md §4](tools.md#4-the-akern-cli-front-end)) |
+| `AKERN_RE_LIMIT` | `4` | kernels that may still nest, this one included. `0`, negative or non-numeric: exit 2 |
 | `TMPDIR` | `/tmp` | directory of the anonymous session |
 
 ### Set for children
 
-Children are the prompt program, the provider and `exec` programs. These
+Children are the system-prompt program, the provider and the programs tool calls run. These
 variables exist so that a child finds the home in use and a nested kernel
 picks up where its parent is; everything else passes through unchanged.
 
 | Variable | Value |
 |---|---|
 | `AKERN_HOME` | the home in use, as resolved above |
-| `AKERN_MODEL` | current `provider/model`; follows `set` |
-| `AKERN_RECURSION_LIMIT` | the value read, minus 1 |
+| `AKERN_MODEL` | the model in effect; follows `settings` entries |
+| `AKERN_RE_LIMIT` | the value read, minus 1 |
 
 ## 2. Arguments
 
 ```
 akern [-p] [-s session.jsonl] [-m provider/model] [-S system.md] [-P key=value]...
-      [--max-processes N] [--kill-grace SECONDS] [--max-line-bytes N] [prompt...]
+      [--max-processes N] [--kill-grace SECONDS] [prompt...]
 ```
 
 Flags are parsed with `getopt_long`: `--flag value` or `--flag=value`, and
@@ -57,18 +57,19 @@ or bad value, or a `-P` without `key=`: usage on stderr, exit 2.
 |---|---|---|
 | `-p`, `--print` | off | print mode: stdout per [§4](#print-mode); exits after it has run once and is quiescent, without waiting for EOF |
 | `-s`, `--session path` | `$TMPDIR/akern-session-XXXXXX` | session file. Created if missing; locked through `path.owner`. Owned by another kernel: exit 2 |
-| `-m`, `--model provider/model` | `$AKERN_MODEL` | runs `$AKERN_HOME/providers/<provider>`, else `$AKERN_HOME/system/providers/<provider>`; the request's `model` is the part after `/` |
-| `-S`, `--system path` | the prompt program's output ([below](#system-prompt)) | system prompt file, read verbatim once at startup; the prompt program is not run. Unreadable: exit 2 |
-| `-P`, `--param key=value` | | repeatable. A provider param in the request's `params`. `value` is sent as JSON when it is a JSON value (`max_tokens=64` is the number 64, `thinking={"type":"adaptive"}` an object), else as a string (`effort=high`) |
+| `-m`, `--model provider/model` | `$AKERN_MODEL` | the model, recorded in the session when it differs from the session's ([settings](#settings)). The kernel runs `$AKERN_HOME/providers/<provider>`, else `$AKERN_HOME/system/providers/<provider>`; the request's `model` is the part after `/` |
+| `-S`, `--system path` | the system-prompt program's output ([below](#system-prompt)) | system prompt file, read verbatim once at startup; the system-prompt program is not run. Unreadable: exit 2 |
+| `-P`, `--param key=value` | | repeatable. Provider params, recorded in the session as all of them when they differ from the session's ([settings](#settings)). `value` is sent as JSON when it is a JSON value (`max_tokens=64` is the number 64, `thinking={"type":"adaptive"}` an object), else as a string (`effort=high`) |
 | `prompt...` | | words joined by spaces, queued as `source: prompt`, `when: idle`, before stdin is read |
 
 ### System prompt
 
-The request's `system` is fixed at startup, before the session is opened and
-before any signal handler is installed: the `-S` file's bytes, else the output
-of the **prompt program**, `$AKERN_HOME/prompt` if it is executable, else
-`$AKERN_HOME/system/prompt`. Empty, or no program in either place: `system`
-is `null`. Only `set` changes it later ([§3](#set)).
+The startup system text is read before the session is opened and before any
+signal handler is installed: the `-S` file's bytes, else the output of the
+**system-prompt program**, `$AKERN_HOME/system-prompt` if it is executable, else
+`$AKERN_HOME/system/system-prompt`. Empty, or no program in either place: there is
+none. It reaches requests like the other settings ([below](#settings)); with
+no system text in effect, the request's `system` is `null`.
 
 | Rule | |
 |---|---|
@@ -78,17 +79,46 @@ is `null`. Only `set` changes it later ([§3](#set)).
 | stderr | the kernel's stderr |
 | failure | a failed `exec`, an exit other than 0, or a signal: `akern: PATH: exit N` (or `signal N`) on stderr, exit 2 |
 
-What the shipped program writes: [tools.md §3](tools.md#the-prompt-program).
+What the shipped program writes: [tools.md §3](tools.md#the-system-prompt-program).
+
+### Tools
+
+Before the system text, the kernel reads the tool definitions: `$AKERN_HOME/tools.json`,
+else `$AKERN_HOME/system/tools.json` ([tools.md §1](tools.md#1-built-in-tools)).
+Each failure is a line on stderr and exit 2:
+
+| stderr | When |
+|---|---|
+| `akern: no tools.json in HOME or HOME/system` | neither file |
+| `akern: PATH: <reason>` | unreadable |
+| `akern: PATH: not a JSON array` | |
+| `akern: PATH: tool N <problem>` | entry N (from 1) is not an object, has no `name` or `program`, is not `shell`, `job` or `edit`, has no `program` (except `job`), or repeats a name |
+
+### Settings
+
+The model, the system text and the params live in the session, as `settings`
+entries ([§5](#session-file)) that each name only the fields they change. The
+settings in effect are the startup ones (`-m` or `$AKERN_MODEL`, the startup
+system text, `-P`), overridden by every `settings` entry on the chain from a
+root to the head, oldest first.
+
+Once the session is open, the kernel appends one `settings` entry with each
+startup setting that differs from what the chain says, or none when nothing
+differs. So `akern -s S` resumes with the session's last settings,
+`akern -s S -m other/model` switches models and records the switch, and a
+branch keeps the settings it had. A front end changes them mid-session with
+`append` ([§3](#append)).
 
 ### Limit flags
 
 | Flag | Default | Value |
 |---|---|---|
-| `--max-processes N` | `32` | `exec` programs running at once; a whole number, at least 1 |
+| `--max-processes N` | `32` | tool calls' programs running at once; one more fails at once with `Not run: already at the --max-processes limit (N).` A whole number, at least 1 |
 | `--kill-grace SECONDS` | `2` | from `SIGTERM` to `SIGKILL`; a number, at least 0 |
-| `--max-line-bytes N` | `67108864` | longest stdin line ([§3](#3-stdin)) or provider line (a longer one is dropped whole and the provider killed); an `exec` program whose kept output would exceed it is killed. A whole number, at least 1 |
 
-Unwritten stdout is capped at 8 MiB: past that, provider and tool stdout stop
+A stdin line ([§3](#3-stdin)) or provider line longer than 64 MiB is dropped
+whole, and the provider killed; a tool call's program whose kept output would
+exceed 64 MiB is killed. Unwritten stdout is capped at 8 MiB: past that, provider and tool stdout stop
 being read until it drains. If stdout closes, events are discarded and the
 kernel carries on.
 
@@ -108,9 +138,8 @@ finish.
 Shutdown, whatever its cause: stdin is no longer read; an open run ends
 `aborted` as by `abort`, except that a response being streamed is discarded;
 every worker's process group gets `SIGTERM`, then `SIGKILL` after
-`--kill-grace` ([kernel.md: proc](kernel.md#proc)). Once all have exited, one
-last user message closes every open `tool_pending` with its `job_result` (a
-call that never started: `Not run: the kernel stopped.`, `ran` 0), stdout is
+`--kill-grace` ([proc.h](../akern/proc.h)). Once all have exited, one
+last user message closes every open `tool_pending` with its `job_result`, stdout is
 flushed and `S.owner` emptied. A sub-agent is a kernel running as a job, so it
 shuts down its own tree when it gets `SIGTERM`; raise `--kill-grace` when
 sub-agents are in use to give it time.
@@ -124,7 +153,7 @@ sub-agents are in use to give it time.
 |---|---|
 | `0` | the last run did not end in `error`, or there was no run |
 | `1` | the last run ended in `error`; or a session append failed |
-| `2` | bad usage, no model, recursion limit, unreadable `-S` file, failed prompt program, session cannot be opened or is owned, fatal system error. `akern: <reason>` on stderr |
+| `2` | bad usage, no model, recursion limit, unreadable `-S` file, failed system-prompt program, session cannot be opened or is owned, fatal system error. `akern: <reason>` on stderr |
 | `130` | shutdown by signal |
 
 ## 3. Stdin
@@ -132,7 +161,7 @@ sub-agents are in use to give it time.
 Lines end with `\n`; a final unterminated line is read at EOF. Each line is
 trimmed and empty lines are ignored. A line starting with `{` is a command,
 anything else is plain text. Commands act as soon as they are read, whatever
-the run is doing. A line longer than `--max-line-bytes` is dropped whole, through its
+the run is doing. A line longer than 64 MiB is dropped whole, through its
 newline, with one command error.
 
 ### Plain text
@@ -160,24 +189,34 @@ Queue a user item in the inbox.
 | Field | Type | Required | Default | Meaning |
 |---|---|---|---|---|
 | `content` | string \| block array | yes | | anything else: error |
-| `when` | `now` \| `turn` \| `idle` \| `deferred` | no | `turn` | [delivery mode](kernel.md#delivery-modes); anything else: error |
+| `when` | `now` \| `turn` \| `idle` \| `deferred` | no | `turn` | [delivery mode](#delivery-modes); anything else: error |
 | `source` | `prompt` \| `inject` | no | `prompt` | reported in `queued`; anything else: error |
 
 Reply `ok`, then a `queued` event.
 
-### prompt
+### Delivery modes
 
-`send` with `when: "idle"` (a `when` field is ignored). The fields are the same.
+| `when` | Delivered | If no run is open |
+|---|---|---|
+| `now` | as `turn`; also preempts a streaming response | starts a run |
+| `turn` | at the next delivery: after a streaming turn ends (with its call answers), or at once when the turn waits on calls, which are then answered pending | starts a run |
+| `idle` | when a turn ends without tool calls, before the run ends | starts a run |
+| `deferred` | with the next delivery of anything else | stays queued |
 
-### steer
+| `source` | From | Mode |
+|---|---|---|
+| `prompt` | a plain line (`turn`), the positional prompt (`idle`), `send` | as sent |
+| `inject` | `send` with `source: inject` | as sent |
+| `job` | a finished job | always `turn`; `abort` turns those already queued `deferred` |
 
-`send` with `when: "turn"` (a `when` field is ignored). The fields are the same.
+Every finished job wakes the agent: no option, global or per call, defers or
+drops a result. Everything due at one moment goes into one user message in
+arrival order, so ten jobs finishing together wake the model once.
 
 ### abort
 
 End the current run. The provider gets `SIGTERM`. The turn's unfinished calls
-are killed (`Killed: the run was aborted.`) or, if not yet started, cancelled
-(`Not run: the run was aborted.`); its `wait: false` calls are answered
+are killed (`Killed: the run was aborted.`); its `wait: 0` calls are answered
 pending. Jobs keep running. Queued `turn` and `idle` user items (`prompt` and
 `inject`) are handed back in `run_end.returned`; queued `now` items stay and
 start the next run; queued job results stay and become `deferred`, so they
@@ -190,46 +229,9 @@ no run is open, only `jobs` has an effect.
 
 | Field | Type | Required | Default | Meaning |
 |---|---|---|---|---|
-| `jobs` | bool | no | `false` | also kill every running job, `wait: false` calls of the turn included |
+| `jobs` | bool | no | `false` | also kill every running job, `wait: 0` calls of the turn included |
 
 Reply `ok`.
-
-### kill
-
-Kill one job's process group (`SIGTERM`, then `SIGKILL` after `--kill-grace`). Its
-result is still delivered, with `"killed":true`. A job still waiting for a
-`--max-processes` slot never starts; its result is `Not run: killed before it started.`
-
-```json
-{"type":"kill","job":"tu_07"}
-```
-
-| Field | Type | Required | Meaning |
-|---|---|---|---|
-| `job` | string | yes | the call id of a pending or `wait: false` call |
-
-Reply `ok`, or error `no such job` when no live job has that id: the id is
-unknown, or the job's result is already queued or delivered. (A `wait: false`
-call that has finished while its turn is still unanswered gets `ok`, with no
-effect.)
-
-### set
-
-Change the request settings from the next request on. Nothing restarts, so jobs survive.
-
-```json
-{"type":"set","model":"anthropic/claude-opus-5-5","system":"/p/system.md","params":{"max_tokens":64000}}
-```
-
-| Field | Type | Required | Default | Meaning |
-|---|---|---|---|---|
-| `model` | string | no | unchanged | `provider/model`; also exported as `AKERN_MODEL` |
-| `system` | string | no | unchanged | path of a file, read when the command arrives; its bytes are the system prompt from the next request, `null` when empty |
-| `params` | object | no | unchanged | replaces all provider params, `-P` ones included; values keep their JSON types, as with `-P` |
-
-A `model` or `system` that is not a string, or `params` that is not an object,
-is ignored. Reply `ok`, or error `system file cannot be read`, and then nothing
-changes.
 
 ### append
 
@@ -243,14 +245,29 @@ Append a session entry for someone else.
 |---|---|---|---|---|
 | `entry` | object | yes | | the entry. `id` and `ts` are assigned by the kernel |
 | `entry.type` | string | yes | | entry type |
-| `entry.parent` | `null` \| string | no | absent | absent: append at the head now. `null`: a new root. An id: must exist. With `parent`, the append is held until the driver is idle or a turn ends without tool calls, so a tool result never lands on a chain without its call |
+| `entry.parent` | `null` \| string | no | absent | absent: append at the head now. `null`: a new root. An id: must exist. With `parent`, the append is held until the kernel is idle or a turn ends without tool calls, so a tool result never lands on a chain without its call |
 
 Reply `ok` with `id`, only when `ref` is given, once the entry is appended.
 Error, at once: `entry needs a type, and parent must be null or an existing id`.
 
+A `settings` entry changes the settings ([§2](#settings)) from the next request
+on, for its chain. Nothing restarts, so jobs survive.
+
+```json
+{"type":"append","entry":{"type":"settings","model":"anthropic/claude-opus-5-5","params":{"max_tokens":64000}}}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `model` | string | `provider/model`; also exported as `AKERN_MODEL` |
+| `system` | string | the system text itself; `""` means `null` |
+| `params` | object | replaces all provider params, `-P` ones included; values keep their JSON types |
+
+A field left out, or of another type, leaves that setting as it was.
+
 ### status
 
-Ask for the driver state. It has no fields. Reply: a `status` event, sent even without `ref`.
+Ask for the turn state. It has no fields. Reply: a `status` event, sent even without `ref`.
 
 ### Replies
 
@@ -265,13 +282,11 @@ The `ref` is added as the last field. With `-p`, no reply is written.
 | `message` | Cause |
 |---|---|
 | `invalid JSON` | a line starting with `{` that does not parse (never carries `ref`) |
-| `line longer than --max-line-bytes` | a stdin line over `--max-line-bytes` (never carries `ref`) |
+| `line longer than 64 MiB` | a stdin line over 64 MiB (never carries `ref`) |
 | `unknown command` | `type` missing or unrecognized |
-| `content must be a string or an array of content blocks` | `send`, `prompt`, `steer` |
+| `content must be a string or an array of content blocks` | `send` |
 | `when must be now, turn, idle or deferred` | `send` |
-| `source must be prompt or inject` | `send`, `prompt`, `steer` |
-| `no such job` | `kill` |
-| `system file cannot be read` | `set` |
+| `source must be prompt or inject` | `send` |
 | `entry needs a type, and parent must be null or an existing id` | `append` |
 
 ## 4. Stdout
@@ -381,7 +396,7 @@ Sent when a call begins, once per `tool_use` block.
 
 ### tool_progress
 
-Sent for each chunk an `exec` program writes to stderr, including after its call is answered pending. Chunks are not split on line boundaries.
+Sent for each chunk of a tool call's output (stdout and stderr share a pipe), including after its call is answered pending; not for an image or PDF. Chunks are not split on line boundaries.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -398,7 +413,7 @@ Sent when a call's result is final. For a job, it is sent when the job finishes.
 | `run` | int | the call's run |
 | `call` | string | |
 | `is_error` | bool | |
-| `status` | `done` \| `killed` \| `cancelled` \| `not run` | `cancelled`: not started before an abort; `not run`: a job killed before it started, or not started when the kernel stopped |
+| `status` | `done` \| `killed` \| `not run` | `not run`: past `--max-processes` |
 
 ### turn_end
 
@@ -411,7 +426,7 @@ Sent after the assistant message when no tools run, or after the results message
 
 ### preempt
 
-Sent when a `now` item interrupts a streaming response ([kernel.md: driver](kernel.md#states)).
+Sent when a `now` item interrupts a streaming response ([delivery modes](#delivery-modes)).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -442,19 +457,19 @@ The reply to `status`.
 
 ```json
 {"type":"status","state":"waiting","run":1,"turn":2,"model":"mock/echo","head":"699d41fa","inbox":0,
- "calls":[{"call":"tu_2","name":"exec","state":"running"}],
- "jobs":[{"call":"tu_1","name":"exec","input":{"argv":["make"],"wait":false},"pid":27798,"state":"running"}]}
+ "calls":[{"call":"tu_2","name":"shell","state":"running"}],
+ "jobs":[{"call":"tu_1","name":"shell","input":{"command":"make","wait":0},"pid":27798,"state":"running"}]}
 ```
 
 | Field | Type | Meaning |
 |---|---|---|
-| `state` | `idle` \| `stream` \| `aborting` \| `waiting` | driver state; `waiting`: on this turn's calls |
+| `state` | `idle` \| `stream` \| `aborting` \| `waiting` | turn state; `waiting`: on this turn's calls |
 | `run`, `turn` | int | latest; `0` before the first |
 | `model` | string | |
 | `head` | string | |
 | `inbox` | int | queued items |
-| `calls` | array | this turn's calls, until they are answered: `{"call","name","state"}`, `state` one of `waiting`, `running`, `done`, `cancelled` |
-| `jobs` | array | live jobs (pending and `wait: false` calls): `{"call","name","input","pid","state"}`; `pid` is `0` when no process runs |
+| `calls` | array | this turn's calls, until they are answered: `{"call","name","state"}`, `state` one of `running`, `done`, `cancelled` |
+| `jobs` | array | live jobs (pending and `wait: 0` calls): `{"call","name","input","pid","state"}`; `pid` is `0` when no process runs |
 | `ref` | any | when given |
 
 ### ok
@@ -523,12 +538,12 @@ With `-p` nothing above is written. Instead:
 
 ```
 providers/<name>                   yours: the program -m <name>/… starts (providers.md)
-prompt                             yours: the program whose output is the system prompt (§2)
-system.md, skills/<name>/          yours: read by the shipped prompt, not the kernel (tools.md §3)
+system-prompt                      yours: the program whose output is the system prompt (§2)
+system.md, skills/<name>/          yours: read by the shipped system-prompt, not the kernel (tools.md §3)
 system/                            what `make` builds and `make install` copies:
   providers/<name>                 used where providers/<name> above is missing
-  prompt                           used where prompt above is missing (tools.md §3)
-  skills/<name>/SKILL.md           listed by the shipped prompt
+  system-prompt                    used where system-prompt above is missing (tools.md §3)
+  skills/<name>/SKILL.md           listed by the shipped system-prompt
 ```
 
 ### Layout
@@ -538,8 +553,8 @@ Everything a session produces sits next to its file, named after it:
 ```
 S                                  the log: one JSON entry per line, append-only
 S.owner                            lock; {"pid":N} while a kernel holds S, empty after
-S.d/calls/<call>.out|.err          an exec stream past its limit (stdout_limit, stderr_limit),
-                                   or both streams of a call answered pending
+S.d/calls/<call>.out               a call's output past its output_limit, or the output of a
+                                   call answered pending
 ```
 
 | Path | Created | Removed |
@@ -550,8 +565,8 @@ S.d/calls/<call>.out|.err          an exec stream past its limit (stdout_limit, 
 | `calls/` files | when a stream spills, or once a call answered pending has a process | never |
 
 A `calls/` file that cannot be created or written is not written further; the
-call's result adds `stdout_file_error` (or `stderr_file_error`) with the
-system's reason, and the file keeps only what was written before.
+call's result says so with the system's reason
+([tools.md](tools.md#shell)), and the file keeps only what was written before.
 
 `<call>` is the `tool_use` id with every character but letters, digits and `-`
 replaced by `_`. The anonymous session (no `-s`) is
@@ -572,7 +587,7 @@ Line 1 is a header; every later line is an entry.
 
 | Field | Required | Meaning |
 |---|---|---|
-| `type` | yes | `message`, or anything else |
+| `type` | yes | `message`, `settings`, or anything else |
 | `id` | yes | unique within the file |
 | `parent` | yes | the `id` of the previous entry in this chain, or `null` for a root |
 | `ts` | yes | when it was appended |
@@ -583,6 +598,7 @@ Line 1 is a header; every later line is an entry.
 |---|---|
 | head | the last entry in the file; reported as `hello.head` |
 | context | follow `parent` from the head to a root, reverse, keep the `message` of each `message` entry, or of the last `replace` entry in the file that targets it |
+| settings | each `settings` entry on the chain, oldest first, overrides the startup settings with the fields it names ([§2](#settings)) |
 | other types | take part in the chain but add nothing to the context; that is how extensions keep state beside the conversation |
 
 A `replace` entry changes what a message entry sends from then on, without
@@ -601,7 +617,7 @@ rewriting the file:
 Like any entry it is appended at the head and moves it, but its effect is not
 tied to its chain: the last one in the file for a target wins on every branch,
 after a resume and in a copied file. The kernel appends one when a provider
-names a block the API rejected ([kernel.md: driver](kernel.md#states)); a front
+names a block the API rejected ([providers.md §4](providers.md#4-errors)); a front
 end appends one with `append`, to redact a secret for example. The original
 message stays in the file.
 
@@ -658,13 +674,13 @@ An `append` with `parent` is held while a run is busy ([§3](#append)).
 
 ### Sub-agents
 
-A sub-agent is `akern -p` on a child session, run by an `exec` call
+A sub-agent is `akern -p` on a child session, run by a `shell` call
 exactly as a person would run it; there is no wrapper command. The parent
 names its session with `-s`; without one, it is anonymous. Its files follow the
 same layout, next to that path:
 
 ```
-s.jsonl                          parent; the call's tool_use holds the child's argv
+s.jsonl                          parent; the call's tool_use holds the child's command
 s.jsonl.d/calls/tu_1.out         the sub-agent's -p answer, as the job's stdout
 agents/rename.jsonl              the sub-agent's whole conversation (-s agents/rename.jsonl)
 agents/rename.jsonl.d/…          its own spills and jobs
@@ -672,17 +688,17 @@ agents/rename.jsonl.d/…          its own spills and jobs
 
 | Step | What happens |
 |---|---|
-| start | `exec {"argv":["akern","-p","-s","agents/rename.jsonl","…"],"wait":false,"stdin_open":true}`; the directory must exist. `wait: false` lets the parent keep working; without it, the parent waits for the answer until a message arrives |
-| model | the parent's: `AKERN_MODEL` is inherited, unless the argv passes `-m` |
+| start | `shell {"command":"akern -p -s agents/rename.jsonl '…'","wait":0,"eof":false}`; the directory must exist. `wait: 0` lets the parent keep working; without it, the parent waits for the answer until a message arrives |
+| model | the parent's: `AKERN_MODEL` is inherited, unless the command passes `-m` |
 | run | the child appends to its own file only; the parent sees it as a job (`tail` the child's file to watch) |
-| steer | `write {"job":"<call id>","content":"…\n"}` to the child's stdin: a plain line is a `turn` item for it ([delivery modes](kernel.md#delivery-modes)), `{"type":"send","when":"now","content":"…"}` interrupts it. Each level steers the one below the same way |
+| steer | `job {"id":"<call id>","stdin":"…\n"}` to the child's stdin: a plain line is a `turn` item for it ([delivery modes](#delivery-modes)), `{"type":"send","when":"now","content":"…"}` interrupts it. Each level steers the one below the same way |
 | end | the child exits once quiescent (`-p` does not wait for EOF); its final answer is the job's stdout, in its `job_result`. Messages up from a child mid-run are not supported: it reports once, at the end |
 | resume | the same `-s` again continues the child's conversation |
 
-Recursion is bounded by `AKERN_RECURSION_LIMIT` ([§1](#1-environment-variables)),
+Recursion is bounded by `AKERN_RE_LIMIT` ([§1](#1-environment-variables)),
 which every nested kernel inherits however it is reached (directly, through
-`sh -c`, a script, a shim); nobody inspects `exec` calls. With the default 4, a
+a script, a shim); nobody inspects `shell` calls. With the default 4, a
 top-level kernel can have three levels of sub-agents below it. Each
-sub-agent's `tool_use` holds its argv, `-s` included, so a front end can walk
+sub-agent's `tool_use` holds its command, `-s` included, so a front end can walk
 the tree from session to session. Two kernels given the same `-s` at once: the
 second exits 2.
