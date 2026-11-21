@@ -1,8 +1,10 @@
 #include "provider.h"
 
+#include <ctype.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static volatile sig_atomic_t terminated;
 static bool emitted;
@@ -125,6 +127,76 @@ void provider_emit_error_at(const char *kind, const char *message, long status, 
         buf_cstr(&where)
     );
     exit(1);
+}
+
+void open_calls_set(open_calls *oc, json assistant_message)
+{
+    oc->n = 0;
+    jiter it = json_iter(json_get(assistant_message, "content"));
+    for (json block; json_next(&it, NULL, &block);)
+        if (json_eq(json_get(block, "type"), "tool_use"))
+            VEC_PUSH(oc->uses, oc->n, oc->cap, block);
+}
+
+static bool same_id(json a, json b)
+{
+    span x = json_get_escaped_body(a), y = json_get_escaped_body(b);
+    return json_is(a, '"') && json_is(b, '"') && x.n == y.n && !memcmp(x.p, y.p, x.n);
+}
+
+bool ids_contain(const json *ids, size_t n, json tool_use_id)
+{
+    for (size_t i = 0; i < n; i++)
+        if (same_id(ids[i], tool_use_id))
+            return true;
+    return false;
+}
+
+bool open_calls_take(open_calls *oc, json tool_use_id)
+{
+    for (size_t i = 0; i < oc->n; i++)
+        if (same_id(json_get(oc->uses[i], "id"), tool_use_id))
+        {
+            memmove(oc->uses + i, oc->uses + i + 1, (oc->n - i - 1) * sizeof *oc->uses);
+            oc->n--;
+            return true;
+        }
+    return false;
+}
+
+/* <session>.d/calls/<call>.out, as the kernel names a call's output file (akern.md §5). */
+static void put_output_path(buf *text, json session, json id)
+{
+    json_decode(session, text);
+    buf_puts(text, ".d/calls/");
+    size_t from = text->n;
+    json_decode(id, text);
+    for (size_t i = from; i < text->n; i++)
+        if (!isalnum((unsigned char)text->p[i]) && text->p[i] != '-')
+            text->p[i] = '_';
+    buf_puts(text, ".out");
+}
+
+void provider_describe_unanswered(buf *text, json tool_use)
+{
+    json id = json_get(tool_use, "id"), input = json_get(tool_use, "input");
+    json session = json_get(buf_span(&request), "session");
+    if (json_eq(json_get(tool_use, "name"), "job"))
+    {
+        buf_puts(text, "Not finished yet; its result arrives later as a message.");
+        return;
+    }
+    buf_puts(text, "Still running in the background as job \"");
+    json_decode(id, text);
+    buf_puts(text, "\", in its own process group");
+    if (json_is(session, '"'))
+    {
+        buf_puts(text, "; its output so far is in ");
+        put_output_path(text, session, id);
+    }
+    buf_puts(text, ". Its result arrives later as a message.");
+    if (json_is(json_get(input, "eof"), 'f'))
+        buf_puts(text, " Its stdin is open: send it input with the job tool.");
 }
 
 void provider_describe_pending(buf *text, json pending)

@@ -54,16 +54,18 @@ and messages that interrupt a turn are part of the kernel from the start.
    on another session file.
 4. **Nothing blocks the loop.** A permission prompt in a shim or a
    ten-minute build stalls only its own call.
-5. **Every call has an answer.** Each `tool_use` is answered before the next
-   request: by its result, a cancellation, or a `tool_pending` that a
-   `job_result` closes later. Interruptions never leave the history invalid.
+5. **Every call has an answer.** Each `tool_use` gets exactly one
+   `tool_result`: in the next message when it ends within its turn (a
+   cancellation included), else later, when its job ends. A provider answers
+   a call that is still running with a placeholder of its own, so the session
+   records only what happened. Interruptions never leave the history invalid.
 6. **One wire format.** UTF-8 JSON lines everywhere. If you can read one
    interface you can read them all.
 7. **The file is the state.** A session is an append-only JSONL file. Model,
    parameters and queues are the only state the kernel holds outside it.
    Resume is opening the file; a branch is one appended marker; compaction is
-   a new root. Background work is logged as `tool_pending` and `job_result`
-   blocks, so what ran and what still runs is in files.
+   a new root. A job's result is logged when it ends, and its output is in its
+   own file meanwhile, so what ran and what still runs is in files.
 8. **Slice, don't parse.** The kernel treats messages as opaque byte spans and
    never re-serializes them. What a provider emits is stored and sent back
    byte-for-byte, and new messages only ever go at the tail. This keeps prompt
@@ -171,13 +173,13 @@ that for this repository.
 | Talking to a model API, auth, retries, cache breakpoints | the provider |
 | `AGENTS.md`, skills, system prompt assembly | the system-prompt program, run once at startup: `$AKERN_HOME/system-prompt`, else the shipped `$AKERN_HOME/system/system-prompt`; or a fixed file with `-S`; a wrapping provider per request |
 | Prompt templates, `!cmd`, `@file` expansion | the frontend |
-| How pending calls and job results are worded | the provider |
+| How pending calls and job results are worded, or whether they need words at all | the provider |
 | Permission gates, path protection, sandboxing | an OS sandbox around the whole kernel, or a shim on `PATH` |
 | Which calls go to the background | the model (`"wait": false` on the call) |
 | Output redaction, summarizing | a shim on `PATH` (the size cap is `shell`'s `output_limit`) |
 | Compaction, fork, tree, export, session listing | commands (`akern-*`) |
 | Sub-agents | another `akern -p`, run through `shell`; the kernel only counts down `AKERN_RE_LIMIT` |
-| Job control for the model | the `tool_pending`'s pid and files, worded by the provider; `tail` through `shell`; `job` for input, end of input, signals and waiting; or end the turn |
+| Job control for the model | the provider's placeholder, naming the job and its file; `tail` through `shell`; `job` for input, end of input, signals and waiting; or end the turn |
 | Steering | a person types into the terminal; a parent sends a line to its sub-agent with `job` |
 | Shells, file editing, state between calls | the model, using whatever is installed |
 | Settings files, model aliases | the `akern-cli` front end and frontends |

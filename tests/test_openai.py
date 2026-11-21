@@ -95,7 +95,8 @@ def api():
     def send(messages, *answers, params=None, model="gpt-6.2-sol", system="be brief", tools=None, key=True, args=()):
         seen.clear()
         replies[:] = [a if isinstance(a, tuple) else (200, a) for a in answers]
-        request = {"model": model, "system": system, "messages": messages, "tools": tools or [], "params": params or {}}
+        request = {"model": model, "session": "/p/s.jsonl", "system": system, "messages": messages, "tools": tools or [],
+                   "params": params or {}}
         run_env = env if key else {k: v for k, v in env.items() if k != "OPENAI_API_KEY"}
         finished = subprocess.run([PROVIDER, *args], input=json.dumps(request), env=run_env, capture_output=True,
                                   text=True, timeout=PATIENCE)
@@ -180,6 +181,7 @@ def test_without_params_effort_is_high_and_no_output_limit_is_sent(api):
     assert not {"max_output_tokens", "instructions", "tools"} & body.keys()
 
 
+# A session from protocol 1, which kept tool_pending and job_result blocks.
 SESSION = [
     user(text("go")),
     calls("tu_1", "tu_2"),
@@ -209,6 +211,24 @@ def test_a_late_result_is_a_user_message_with_its_media_beside_it(api):
     assert items[7] == {"role": "user", "content": [
         {"type": "input_text", "text": '<job call="tu_1" name="exec" status="exit 0" ran="41s">\n{"stdout":"done"}\n</job>'},
         {"type": "input_image", "image_url": f"data:image/png;base64,{PNG}"}]}
+
+
+def test_protocol_2_calls_without_answers_get_placeholders_and_late_results_go_as_text(api):
+    late_result = dict(result("tu_1", '{"stdout":"done"}'), status="exit 0", ran=41)
+    items = api([user(text("go")), calls("tu_1", "tu_2"), user(text("steer"), result("tu_2", "two")),
+                 {"role": "assistant", "content": [text("waiting")]}, user(late_result), calls("tu_3")]).input
+    placeholder = ('Still running in the background as job "{}", in its own process group; its output so far is in '
+                   '/p/s.jsonl.d/calls/{}.out. Its result arrives later as a message.')
+    assert items[3:] == [
+        {"type": "function_call_output", "call_id": "tu_1", "output": placeholder.format("tu_1", "tu_1")},
+        {"type": "function_call_output", "call_id": "tu_2", "output": "two"},
+        {"role": "user", "content": [{"type": "input_text", "text": "steer"}]},
+        {"role": "assistant", "content": "waiting"},
+        {"role": "user", "content": [{"type": "input_text", "text":
+            '<job call="tu_1" name="exec" status="exit 0" ran="41s">\n{"stdout":"done"}\n</job>'}]},
+        {"type": "function_call", "call_id": "tu_3", "name": "exec", "arguments": '{"argv": ["ls"]}'},
+        {"type": "function_call_output", "call_id": "tu_3", "output": placeholder.format("tu_3", "tu_3")},
+    ]
 
 
 def test_a_tool_result_with_media_is_sent_as_a_list_of_parts(api):

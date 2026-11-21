@@ -155,13 +155,25 @@ static bool finished(loop *l)
            (input_has_ended(l->input) || (l->config->print_answers && turns_has_run(l->turns)));
 }
 
+/* A settled event each time the kernel becomes quiescent after working. */
+static void note_settling(loop *l)
+{
+    bool settled = turns_is_quiescent(l->turns);
+    if (settled && !l->settled && !l->stopping)
+        output_emit(l->output, "{'type':'settled','run':%d}", turns_get_run(l->turns));
+    l->settled = settled;
+}
+
 int loop_run(loop *l)
 {
+    l->settled = true;
     advance(l);
+    note_settling(l);
     while (!(l->stopping && proc_count(l->procs) == 0))
     {
         wait_for_io(l);
         advance(l);
+        note_settling(l);
         if (!l->stopping && finished(l))
             shutdown_kernel(l, turns_get_exit_code(l->turns));
     }

@@ -62,7 +62,7 @@ def test_abort_kills_running_calls_and_hands_back_queued_items(kernel):
     [end] = run.events_of("run_end")
     assert (end["reason"], end["returned"]) == ("aborted", ["and then this"])
     assert run.result_text == "Killed: the run was aborted."
-    assert [e["status"] for e in run.events_of("tool_end")] == ["killed"]
+    assert [e["block"]["is_error"] for e in run.events_of("block")] == [True]
 
 
 def test_abort_hands_back_only_user_items_and_keeps_a_finished_jobs_result_for_later(kernel, script):

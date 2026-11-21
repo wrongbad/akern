@@ -1,6 +1,7 @@
 /* anthropic_messages: the Anthropic Messages format, for the providers whose model speaks it. Owns
    rendering the canonical messages as a Messages request's messages (call answers first, adjacent
-   user messages merged, tool_pending and job_result worded as text, a non-object tool input as {},
+   user messages merged, calls still running answered with placeholders and late results worded
+   as text, a non-object tool input as {},
    x-* blocks and fields dropped, media within the API's size limits), finding the canonical block
    an API error names, and reading a Messages stream into events and a result. Knows no
    transport: the caller feeds it the stream's events. */

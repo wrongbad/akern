@@ -18,7 +18,7 @@ def test_shutdown_mid_tool_answers_every_call_and_closes_every_job_then_exits_13
     assert run.result_texts == ["Killed: the run was aborted."]
     [pending] = run.pending
     [(late, _)] = run.job_reports
-    assert (late["tool_use_id"], late["is_error"]) == (pending["tool_use_id"], True)
+    assert (late["tool_use_id"], late["is_error"]) == (pending["call"], True)
     assert [e["reason"] for e in run.events_of("run_end")] == ["aborted"]
 
 

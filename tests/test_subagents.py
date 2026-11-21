@@ -18,11 +18,11 @@ def test_a_line_written_to_a_sub_agents_stdin_is_answered_while_its_call_runs(ke
     run = kernel(tool("shell", command=f"akern -p -s agents/steer.jsonl '!gate {gate}'",
                       wait=0, eof=False),
                  later=[(lambda run: seen_pending()(run) and sub_agent.entries_of("message")[1:],
-                         lambda run: tool("job", id=run.pending[0]["tool_use_id"], stdin="also say hi\n"))],
+                         lambda run: tool("job", id=run.pending[0]["call"], stdin="also say hi\n"))],
                  during=lambda run: wait_for(lambda: "echo: also say hi" in sub_agent.replies)
                  and gate.write_text("released\n"))
     [wrote] = run.result_texts
-    assert wrote == f"{run.pending[0]['tool_use_id']}: wrote 12 bytes to its stdin."
+    assert wrote == f"{run.pending[0]['call']}: wrote 12 bytes to its stdin."
     [(_, result)] = run.job_reports
     assert result["output"] == f"echo: also say hi\nThe tool said: [exit 0]\nwaiting on {gate}\nreleased\n\n"
 

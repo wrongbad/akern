@@ -44,8 +44,8 @@ exports it.
 
 ### Providers
 
-Compare two or three wordings of `tool_pending` and `job_result`
-(`provider_describe_pending`, `provider_describe_job`) on long-running tasks:
+Compare two or three wordings of placeholders and late results
+(`provider_describe_unanswered`, `provider_describe_job`) on long-running tasks:
 does the model wait, poll in a loop, or forget the job.
 
 ### Examples
@@ -116,13 +116,13 @@ directories it trusts. Decide when a real project needs it.
 
 ### Jobs after a kernel restart
 
-A job dies with its kernel; after `SIGKILL` of the kernel its `tool_pending`
-stays open in the session.
+A job dies with its kernel; after `SIGKILL` of the kernel its call stays
+unanswered in the session.
 
 | Option | Cost |
 |---|---|
-| nothing (today) | the open `tool_pending` stays open on resume |
-| on open, close each open `tool_pending` with a `job_result` saying it was lost | a session scan at open; the kernel must find open pendings in the chain |
+| nothing (today) | the call stays unanswered on resume; providers keep answering it with a placeholder |
+| on open, answer each unanswered call with a late `tool_result` saying it was lost | a session scan at open; the kernel must find unanswered calls in the chain |
 | jobs write straight to their files and a restarted kernel tails them, re-adopting survivors | file-based capture for every job, for an uncommon case |
 
 Tools that must outlive the kernel (servers) can daemonize themselves under

@@ -38,12 +38,14 @@ to `render.jq`, so every event goes `akern → render.jq`; events are in
 - The provider exits.
 - `akern → session file`: the assistant message, byte for byte.
 - `akern → render.jq`: a `message` event with it.
-- `akern → render.jq`: a `tool_start` event for each call, in order. The calls
-  start only now, after the provider has exited.
+- The calls start only now, after the provider has exited.
+- `akern → render.jq`: a `tool_start` event for each call, in order, as its
+  program starts, with its pid.
 - `akern` runs `bash -c 'cat README.md'` and `bash -c 'ls src'` at once, in
   its working directory; bash runs each program in its own place.
 - `cat → akern`, `ls → akern`: their stdout and stderr. Each exits.
-- `akern → render.jq`: a `tool_end` event for each, as it finishes.
+- `akern → render.jq`: a `block` event for each, as it finishes: its
+  `tool_result`, exactly as the results message will hold it.
 - `akern → session file`: both results in one user message, in call order
   (`cat`, then `ls`).
 - `akern → render.jq`: a `message` event with it.
@@ -65,5 +67,7 @@ to `render.jq`, so every event goes `akern → render.jq`; events are in
 The model runs only in a new provider process, one per turn. A line arriving
 while idle starts one; so does the last running call of a turn finishing, and
 results that finish together share one message. A `"wait": false` call would
-be answered `tool_pending` at once, and its later exit would wake the model
-again with a `job_result` ([akern.md: delivery modes](akern.md#delivery-modes)).
+get no answer in the results message; the provider would answer it with a
+placeholder, and its later exit would wake the model again with its late
+`tool_result` ([akern.md: delivery modes](akern.md#delivery-modes)). Once no
+run, queued item or job is left, `akern` sends `settled`.

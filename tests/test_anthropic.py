@@ -60,7 +60,8 @@ def api():
     def run(messages, *answers, params=None, args=()):
         seen.clear()
         replies[:] = [a if isinstance(a, tuple) else (200, a) for a in answers]
-        request = {"model": "claude-opus-5-5", "system": "", "messages": [], "tools": [], "params": params or {}}
+        request = {"model": "claude-opus-5-5", "session": "/p/s.jsonl", "system": "", "messages": [], "tools": [],
+                   "params": params or {}}
         raw = messages if isinstance(messages, str) else json.dumps(messages)
         stdin = json.dumps(request).replace('"messages": []', '"messages": ' + raw)
         done = subprocess.run([PROVIDER, *args], input=stdin, env=env, capture_output=True, text=True, timeout=PATIENCE)
@@ -107,6 +108,7 @@ def late(id, *content, status="exit 0", ran=41):
             "status": status, "ran": ran, "content": list(content)}
 
 
+# A session from protocol 1, which kept tool_pending and job_result blocks.
 SESSION = [
     user(text("go")),
     calls("tu_1", "tu_2"),
@@ -163,13 +165,74 @@ def test_kernel_only_fields_are_not_sent(api):
             assert block["type"] not in ("tool_pending", "job_result")
 
 
+# Protocol 2: a call still running when its turn is answered has no block; its result comes later
+# as a tool_result that also has name, status and ran.
+SESSION_2 = [
+    user(text("go")),
+    calls("tu_1", "tu_2"),
+    user(text("steer"), result("tu_2", "two")),
+    calls("tu_3"),
+    user(result("tu_1", '{"stdout":"done"}', status="exit 0", ran=41), result("tu_3", "three")),
+    calls("tu_4"),
+    {"role": "assistant", "content": [text("while it runs")]},
+    user(text("next prompt")),
+]
+
+PLACEHOLDER_1 = ('Still running in the background as job "tu_1", in its own process group; its output so far is in '
+                 '/p/s.jsonl.d/calls/tu_1.out. Its result arrives later as a message.')
+
+
+def test_a_call_still_running_gets_a_placeholder_and_answers_keep_call_order(api):
+    blocks = sent(api, SESSION_2[:3])[2]["content"]
+    assert blocks == [{"type": "tool_result", "tool_use_id": "tu_1", "content": [text(PLACEHOLDER_1)]},
+                      {"type": "tool_result", "tool_use_id": "tu_2", "is_error": False, "content": [text("two")]},
+                      text("steer")]
+
+
+def test_a_late_tool_result_goes_as_a_job_text_and_an_answer_without_its_facts(api):
+    blocks = sent(api, SESSION_2[:5])[4]["content"]
+    assert blocks == [{"type": "tool_result", "tool_use_id": "tu_3", "is_error": False, "content": [text("three")]},
+                      text('<job call="tu_1" name="exec" status="exit 0" ran="41s">\n{"stdout":"done"}\n</job>')]
+
+
+def test_calls_no_user_message_follows_are_answered_by_a_message_of_placeholders(api):
+    messages = sent(api, SESSION_2)
+    assert [m["role"] for m in messages] == ["user", "assistant", "user", "assistant", "user", "assistant", "user",
+                                             "assistant", "user"]
+    [answer] = messages[6]["content"]
+    assert answer["tool_use_id"] == "tu_4"
+    assert sent(api, SESSION_2[:6])[-1] == messages[6]
+
+
+@pytest.mark.parametrize("name, input, wording", [
+    ("exec", {"eof": False}, 'Still running in the background as job "tu_1", in its own process group; its output so far '
+                             'is in /p/s.jsonl.d/calls/tu_1.out. Its result arrives later as a message. Its stdin is '
+                             'open: send it input with the job tool.'),
+    ("job", {"id": "tu_0", "wait": 5}, "Not finished yet; its result arrives later as a message."),
+])
+def test_a_placeholder_says_what_the_model_can_do_with_the_call(api, name, input, wording):
+    call = {"role": "assistant", "content": [{"type": "tool_use", "id": "tu_1", "name": name, "input": input}]}
+    [answer] = sent(api, [user(text("go")), call])[2]["content"]
+    assert answer["content"] == [text(wording)]
+
+
+def test_an_error_in_a_message_after_placeholders_names_the_kernels_message(api):
+    messages = [user(text("go")), calls("tu_1"), {"role": "assistant", "content": [text("waiting")]}, user(text("look"), IMAGE)]
+    assert rejected(api, messages, "messages.4.content.1.image.source.base64.data: image exceeds 5 MB maximum")["at"] == {
+        "message": 3, "block": 1}
+
+
 def test_an_earlier_message_renders_the_same_whatever_follows(api):
     def ordered(messages):
         return dict(json.loads(api(messages)[0], object_pairs_hook=list))["messages"]
 
-    whole = ordered(SESSION)
-    for n in range(1, len(SESSION)):
-        part = ordered(SESSION[:n])
+    whole = ordered(SESSION_2)
+    for n in range(1, len(SESSION_2)):
+        if SESSION_2[n - 1]["role"] == "assistant" and SESSION_2[n]["role"] == "user":
+            # The kernel sends calls without a user message after them only when none will come
+            # before the model's reply: every call is a job and nothing is due.
+            continue
+        part = ordered(SESSION_2[:n])
         assert part[:-1] == whole[:len(part) - 1]
         last, same = dict(part[-1]), dict(whole[len(part) - 1])
         assert last["role"] == same["role"]

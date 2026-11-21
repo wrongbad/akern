@@ -139,7 +139,7 @@ Shutdown, whatever its cause: stdin is no longer read; an open run ends
 `aborted` as by `abort`, except that a response being streamed is discarded;
 every worker's process group gets `SIGTERM`, then `SIGKILL` after
 `--kill-grace` ([proc.h](../akern/proc.h)). Once all have exited, one
-last user message closes every open `tool_pending` with its `job_result`, stdout is
+last user message carries the result of every job still open, stdout is
 flushed and `S.owner` emptied. A sub-agent is a kernel running as a job, so it
 shuts down its own tree when it gets `SIGTERM`; raise `--kill-grace` when
 sub-agents are in use to give it time.
@@ -296,7 +296,7 @@ Each event carries `run`, `turn` or `call` where they apply. A typical
 run:
 
 ```json
-{"type":"hello","protocol":1,"session":"s.jsonl","head":"","model":"mock/echo"}
+{"type":"hello","protocol":2,"session":"s.jsonl","head":"","model":"mock/echo"}
 {"type":"queued","source":"prompt","when":"turn","n":1}
 {"type":"run_start","run":1}
 {"type":"message","run":1,"id":"b03a71d1","source":"inbox","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}
@@ -305,10 +305,24 @@ run:
 {"type":"message","run":1,"id":"6690fe78","source":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"echo: hi"}]}}
 {"type":"turn_end","run":1,"turn":1,"usage":{"input":1,"output":1,"cache_read":0,"cache_write":0}}
 {"type":"run_end","run":1,"reason":"done","returned":[],"error":null}
+{"type":"settled","run":1}
 ```
 
 A front end that only shows the answer prints `text_delta` text as it arrives
 and stops at `run_end`; a script that wants only the final text uses `-p`.
+
+Messages are built the same way whoever writes them. An assistant message
+streams as provider events (`text_delta`, `tool_use_start`, …), then is
+committed as one `message` event. A user message's tool results are announced
+one by one as `block` events, each as its call ends, then committed in the
+`message` that carries them. The `message` event is always the record: it is
+what the session holds, and a front end that missed the previews, or reads the
+session file instead, loses nothing.
+
+A tool call is open from its `tool_start` until a `block` holding its
+`tool_result`. That holds whether the call ends within its turn or runs on as a
+job and ends runs later; a front end shows one card per call and closes it on
+that block.
 
 ### hello
 
@@ -316,7 +330,7 @@ Sent once at startup, after the session is opened and before the positional prom
 
 | Field | Type | Meaning |
 |---|---|---|
-| `protocol` | int | `1` |
+| `protocol` | int | `2`. Protocol 1 had `tool_end` where 2 has `block`, `tool_start` before the program started and without its process, no `settled`, and `tool_pending` and `job_result` blocks in the session ([§5](#session-file)) |
 | `session` | string | session path, as given |
 | `head` | string | head entry id; `""` for an empty session |
 | `model` | string | `provider/model` |
@@ -385,7 +399,8 @@ belong to the open turn: `text_delta`, `thinking_delta`, `tool_use_start`,
 
 ### tool_start
 
-Sent when a call begins, once per `tool_use` block.
+Sent once per `tool_use` block, when the call is under way: once its program
+has started, or, for a call that fails at once, just before its `block`.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -393,6 +408,9 @@ Sent when a call begins, once per `tool_use` block.
 | `call` | string | `tool_use` id |
 | `name` | string | tool name |
 | `input` | object or string | `{}` when missing or empty; a string when the model's input was not a JSON object (the call then fails) |
+| `pid` | int | its process; absent when none runs (a `job` call, or one that failed before starting) |
+| `out` | string | with `pid`: the file its output goes to once it spills past its limit or the call becomes a job ([§5](#layout)); it may never be written |
+| `stdin_open` | bool | with `pid`: its stdin stays open for `job` input (`eof: false`) |
 
 ### tool_progress
 
@@ -404,16 +422,22 @@ Sent for each chunk of a tool call's output (stdout and stderr share a pipe), in
 | `call` | string | |
 | `data` | string | the chunk |
 
-### tool_end
+### block
 
-Sent when a call's result is final. For a job, it is sent when the job finishes.
+Sent when a block of a coming user message is final: a call's `tool_result`,
+as the call ends. A call that ends within its turn goes in that turn's results
+message; a job's result is queued and goes in the next delivery
+([delivery modes](#delivery-modes)), or at exit. Either way the `message` that
+carries it comes later, with the block exactly as announced.
+
+```json
+{"type":"block","run":1,"block":{"type":"tool_result","tool_use_id":"tu_1","is_error":false,"content":[{"type":"text","text":"[exit 0]\nok\n"}]}}
+```
 
 | Field | Type | Meaning |
 |---|---|---|
 | `run` | int | the call's run |
-| `call` | string | |
-| `is_error` | bool | |
-| `status` | `done` \| `killed` \| `not run` | `not run`: past `--max-processes` |
+| `block` | object | the block as it will be stored: for a job, with `name`, `status` and `ran` ([§5](#session-file)) |
 
 ### turn_end
 
@@ -450,6 +474,16 @@ Sent when a run ends.
 | `reason` | `done` \| `aborted` \| `error` | |
 | `returned` | array | contents (string or block array) of the queued user items (`prompt`, `inject`) handed back by `abort` or shutdown; job results are never handed back |
 | `error` | object \| null | with `reason: error`: kernel error `{"where","message"}`, or the provider's `error` line as sent; otherwise `null`. A provider `result` after an `error` line wins |
+
+### settled
+
+Sent each time the kernel becomes quiescent after working ([§2](#exit)): no
+run, nothing due in the inbox, no job running. A front end that waits for all
+of the work a prompt started, a job's result included, waits for this.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `run` | int | the latest run |
 
 ### status
 
@@ -601,6 +635,16 @@ Line 1 is a header; every later line is an entry.
 | settings | each `settings` entry on the chain, oldest first, overrides the startup settings with the fields it names ([§2](#settings)) |
 | other types | take part in the chain but add nothing to the context; that is how extensions keep state beside the conversation |
 
+Tool calls in messages:
+
+| Rule | |
+|---|---|
+| answers | each `tool_use` gets exactly one `tool_result`, in a later user message |
+| in its turn | a call that ended by the time its turn was answered has its `tool_result` in the user message right after its assistant message |
+| a job | a call still running then (answered pending: its `wait` ran out, a message arrived first, or `wait: 0`) has no block there. Its `tool_result` comes in a later user message when it ends, with three more fields: `name`, `status` (`exit N`, `signal N`, `killed`, `not run`) and `ran` (seconds since its program started, rounded; `0` if it never started) |
+| placeholders | not in the session: a provider answers each call still running with a placeholder of its own and sends a late `tool_result` as text, or as a native asynchronous result where its API has one ([providers.md §5](providers.md#5-messages)) |
+| protocol 1 | sessions written before kept a `tool_pending` block where a job is now unanswered, and its late result as a `job_result` block; providers still read both |
+
 A `replace` entry changes what a message entry sends from then on, without
 rewriting the file:
 
@@ -658,9 +702,9 @@ and prompt caches stable.
 | crash | the lock goes with the process; `S.owner` keeps a dead pid, which the next open overwrites |
 | resume | `akern -s S`: the context is rebuilt from the head |
 
-A `tool_pending` with no later `job_result` was running when its kernel was
-killed with `SIGKILL`; any other exit closes it. Its files keep whatever it
-wrote.
+A `tool_use` with no `tool_result` anywhere after it was running when its
+kernel was killed with `SIGKILL`; any other exit answers it. Its files keep
+whatever it wrote.
 
 ### Branches and forks
 
@@ -692,7 +736,7 @@ agents/rename.jsonl.d/…          its own spills and jobs
 | model | the parent's: `AKERN_MODEL` is inherited, unless the command passes `-m` |
 | run | the child appends to its own file only; the parent sees it as a job (`tail` the child's file to watch) |
 | steer | `job {"id":"<call id>","stdin":"…\n"}` to the child's stdin: a plain line is a `turn` item for it ([delivery modes](#delivery-modes)), `{"type":"send","when":"now","content":"…"}` interrupts it. Each level steers the one below the same way |
-| end | the child exits once quiescent (`-p` does not wait for EOF); its final answer is the job's stdout, in its `job_result`. Messages up from a child mid-run are not supported: it reports once, at the end |
+| end | the child exits once quiescent (`-p` does not wait for EOF); its final answer is the job's stdout, in the job's late `tool_result`. Messages up from a child mid-run are not supported: it reports once, at the end |
 | resume | the same `-s` again continues the child's conversation |
 
 Recursion is bounded by `AKERN_RE_LIMIT` ([§1](#1-environment-variables)),

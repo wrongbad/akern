@@ -4,37 +4,47 @@
 def session_violations(entries):
     messages = [e for e in entries if e.get("type") == "message"]
     found = []
-    pending, late = [], []
+    uses, answers = [], []
     for i, entry in enumerate(messages):
         message = entry["message"]
         blocks = _blocks(message)
-        pending += [b["tool_use_id"] for b in blocks if b.get("type") == "tool_pending"]
-        late += [b["tool_use_id"] for b in blocks if b.get("type") == "job_result"]
-        uses = [b["id"] for b in blocks if b.get("type") == "tool_use"]
-        if not uses:
+        calls = [b["id"] for b in blocks if b.get("type") == "tool_use"]
+        results = [b["tool_use_id"] for b in blocks if b.get("type") == "tool_result"]
+        answers += [r for r in results if r in uses]
+        if not calls:
             continue
         if entry.get("meta", {}).get("stop") == "aborted":
-            found.append(f"tool_use inside an aborted message: {uses}")
+            found.append(f"tool_use inside an aborted message: {calls}")
         if message["role"] != "assistant":
             continue
+        uses += calls
         following = messages[i + 1]["message"] if i + 1 < len(messages) else {}
-        answered = [b["tool_use_id"] for b in _blocks(following)
-                    if b.get("type") in ("tool_result", "tool_pending")]
-        if answered != uses:
-            found.append(f"tool_use {uses} answered by {answered} in the next message")
-    if sorted(pending) != sorted(late):
-        found.append(f"pending calls {pending} closed by late results {late}")
+        in_turn = [b["tool_use_id"] for b in _blocks(following)
+                   if b.get("type") == "tool_result" and "status" not in b]
+        if stray := [r for r in in_turn if r not in calls]:
+            found.append(f"tool_use {calls} followed by results of other calls {stray}")
+    if wrong := [u for u in uses if answers.count(u) != 1]:
+        found.append(f"tool_use not answered exactly once: {wrong}")
     return found
 
 
 def event_violations(events):
     found = []
-    started = [e["call"] for e in events if e["type"] == "tool_start"]
-    finished = {e["call"] for e in events if e["type"] == "tool_end"}
-    finished |= {b["tool_use_id"] for e in events if e["type"] == "message"
-                 for b in _blocks(e["message"]) if b.get("type") in ("tool_result", "job_result")}
-    if unfinished := [c for c in started if c not in finished]:
-        found.append(f"tool_start without tool_end or a result: {unfinished}")
+    started, announced = [], []
+    for e in events:
+        if e["type"] == "tool_start":
+            started.append(e["call"])
+        elif e["type"] == "block" and e["block"].get("type") == "tool_result":
+            call = e["block"]["tool_use_id"]
+            if call not in started:
+                found.append(f"block for {call} before its tool_start")
+            announced.append(call)
+        elif e["type"] == "message" and e["message"].get("role") == "user":
+            results = [b["tool_use_id"] for b in _blocks(e["message"]) if b.get("type") == "tool_result"]
+            if unannounced := [r for r in results if r in started and r not in announced]:
+                found.append(f"message with results no block event announced: {unannounced}")
+    if unfinished := [c for c in started if c not in announced]:
+        found.append(f"tool_start without a block: {unfinished}")
     streams = [e["type"] for e in events
                if e["type"] in ("turn_start", "run_end", "replace") or e["type"] == "message" and e.get("source") == "assistant"]
     if any(a == b == "turn_start" for a, b in zip(streams, streams[1:])):

@@ -27,6 +27,7 @@ One JSON object on stdin:
 
 ```json
 {"model":"claude-opus-5-5",
+ "session":"s.jsonl",
  "system":"You are …",
  "messages":[ … ],
  "tools":[{"name":"shell",…},{"name":"write",…},{"name":"edit",…}],
@@ -36,6 +37,7 @@ One JSON object on stdin:
 | Field | Value |
 |---|---|
 | `model` | string; the part of `provider/model` after the `/` |
+| `session` | the session's path, as given to `-s`; a call's output file is `<session>.d/calls/<call>.out` ([akern.md §5](akern.md#layout)), which placeholders name |
 | `system` | the system text in effect ([akern.md](akern.md#settings)); `null` when empty |
 | `messages` | the context: the `message` of each `message` entry from the session's head back to a root, oldest first ([akern.md §5](akern.md#session-file)); shape in §5 |
 | `tools` | the tool definitions from `tools.json`, `{name, description, input_schema}`, compacted to one line ([tools.md §1](tools.md#1-built-in-tools)) |
@@ -112,7 +114,7 @@ lines, never the exit status.
 |---|---|
 | `message` | index into the request's `messages` |
 | `block` | index into that message's `content` |
-| `inner` | index into that block's `content` (a `tool_result` or `job_result`); absent for a block of the message itself |
+| `inner` | index into that block's `content` (a `tool_result`, or a protocol-1 `job_result`); absent for a block of the message itself |
 
 The kernel then swaps that block for a note in the session and sends the
 request again ([akern.md: error](akern.md#error)). Apart from that,
@@ -145,15 +147,13 @@ typed content blocks. Other providers translate down from it.
   {"type":"tool_use","id":"tu_02","name":"read","input":{"path":"/p/README.md"}}]}
 
 {"role":"user","content":[
-  {"type":"tool_pending","tool_use_id":"tu_01","name":"shell","state":"running","pid":4242,
-   "out":"s.jsonl.d/calls/tu_01.out","stdin_open":false},
   {"type":"tool_result","tool_use_id":"tu_02","is_error":false,
    "content":[{"type":"text","text":"# agent\n…"}]},
   {"type":"text","text":"use the staging config"}]}
 
 {"role":"user","content":[
-  {"type":"job_result","tool_use_id":"tu_01","name":"shell","is_error":false,"status":"exit 0","ran":41,
-   "content":[{"type":"text","text":"…"}]}]}
+  {"type":"tool_result","tool_use_id":"tu_01","is_error":false,
+   "content":[{"type":"text","text":"…"}],"name":"shell","status":"exit 0","ran":41}]}
 ```
 
 ### Blocks the kernel reads or writes
@@ -161,20 +161,22 @@ typed content blocks. Other providers translate down from it.
 | Block | In | Fields |
 |---|---|---|
 | `tool_use` | assistant | `id`, `name`, `input`: a JSON object; or, when the model's input text was not a JSON object, a string holding that text. Empty input is `{}` |
-| `tool_result` | user | `tool_use_id`, `is_error`, `content` (block array) |
-| `tool_pending` | user | `tool_use_id`, `name`, `state` (`running`); while its process runs also `pid`, `out` (its output file; sessions from before stderr was merged also have `err`) and `stdin_open` |
-| `job_result` | user | `tool_use_id`, `name`, `is_error`, `status` (`exit N`, `signal N`, `killed`, `not run`), `ran` (seconds since the program started, rounded; `0` if it never started), `content` (as a `tool_result` would carry it) |
+| `tool_result` | user | `tool_use_id`, `is_error`, `content` (block array). A late one, a job's, also `name`, `status` (`exit N`, `signal N`, `killed`, `not run`) and `ran` (seconds since the program started, rounded; `0` if it never started): facts for wording it, not API fields |
+| `tool_pending` | user | protocol 1 only: `tool_use_id`, `name`, `state` (`running`); while its process ran also `pid`, `out` (sessions from before stderr was merged also have `err`) and `stdin_open` |
+| `job_result` | user | protocol 1 only: a late result, with the fields a late `tool_result` has |
 | `text`, `image`, `document` | user | built by the kernel from `send` content and tool results; media as `{"type":"image"\|"document","source":{"type":"base64","media_type":…,"data":…}}`. A `document` may carry `name`: `shell`'s `stdout_name` sets it |
 
 ### Ordering
 
-- Each assistant message's calls are answered in the next user message: one
-  block per call, in call order, before any other block. A finished or
-  cancelled call gets a `tool_result`; one still in progress a `tool_pending`,
-  and it is now a job.
-- Each `tool_pending` is closed by exactly one `job_result` in a later user
-  message, also across a normal shutdown. Only after `SIGKILL` of the kernel
-  does one stay open.
+- A call that finished or was cancelled by the time its turn was answered
+  has its `tool_result` in the next user message, in call order, before any
+  other block. A call still running then has nothing there: it is now a job,
+  and the provider answers it (below). The next message may not be a user
+  message at all: when every call is a job and nothing is due, the kernel
+  sends the request at once, ending with the calls.
+- Each job's `tool_result` comes in a later user message, with its facts,
+  also across a normal shutdown. Only after `SIGKILL` of the kernel does a call
+  stay unanswered.
 - Inbox items delivered at the same moment follow as further blocks of the
   same user message; with no call answers they form a user message of their own.
 - Two user messages can be adjacent (a job result delivered at exit, an
@@ -186,13 +188,20 @@ typed content blocks. Other providers translate down from it.
 
 | Input | Provider duty |
 |---|---|
-| `tool_pending`, `job_result` | facts, not API blocks: render them as something the API accepts (text, or a native asynchronous tool result where an API has one). A `job_result` may arrive after the conversation branched or compacted away its call, so it must not depend on the `tool_use` being in context: `anthropic` renders it as text, never as a `tool_result` |
+| a call the next user message does not answer | APIs want every call answered at once, so a provider answers each one itself, just in time, from what the request holds: a placeholder (`provider_describe_unanswered`) in the user message that follows, or in one of its own when an assistant message or the end follows. An API with native asynchronous tool results needs none: it sends the call open |
+| a `tool_result` whose call is not open | a late result: its call was answered by a placeholder, or branched or compacted away. Render it as something the API accepts with no `tool_use` before it: `anthropic` and `openai` send text (`provider_describe_job`) with the result's media after it |
+| `tool_result` facts (`name`, `status`, `ran`) | not sent as fields |
+| `tool_pending`, `job_result` (protocol 1) | a `tool_pending` as the placeholder it stood for; a `job_result` as a late result |
 | adjacent user messages | merge them if the API requires alternation |
 | `tool_use` with a string `input` | send `{}`, since APIs take only an object (the kernel already answered it with an error) |
 | an image or document the API rejects | send it as is, and map the API's error to `invalid_block` when it names the block, so the session drops it. A provider checks byte counts only: limits whose error names no block (a request's total size), and an image's size where that saves uploading a doomed request; it swaps such a block for a note in the request alone |
 
-Rendering depends only on each message, so earlier messages render the same on
-every request and the prompt cache holds (request-wide media limits aside).
+Rendering depends only on each message and the calls before it, so earlier
+messages render the same on every request and the prompt cache holds
+(request-wide media limits aside). A placeholder is worded from the
+`tool_use` and the session path alone, so it is the same bytes every time;
+the one exception is a request that ended with calls whose response was then
+discarded (a preemption), where the next request answers them for real.
 The provider owns everything API-specific: credentials, retries, cache
 breakpoints, server-tool pauses, format translation and reading the API's
 errors. It keeps no table of models or of accepted media types
@@ -241,9 +250,9 @@ Rendering:
 
 | Block | Sent as |
 |---|---|
-| `tool_pending`, `state: running` | `tool_result`: `Still running in the background (pid N, its own process group); its output so far is in OUT and ERR. Its result arrives later as a message.`, plus `Its stdin is open: send it input with the job tool, id "ID".` when `stdin_open` |
-| `tool_pending`, any other state | `tool_result`: `Not finished yet; its result arrives later as a message.` |
-| `job_result` | a text block `<job call="…" name="…" status="…" ran="Ns">`, the result's text, `</job>`, with the result's non-text blocks after it |
+| a call still running | `tool_result`: `Still running in the background as job "ID", in its own process group; its output so far is in SESSION.d/calls/ID.out. Its result arrives later as a message.`, plus ` Its stdin is open: send it input with the job tool.` when its input has `eof: false`; for a `job` call, `Not finished yet; its result arrives later as a message.` In call order with the other answers; in a user message of its own when none follows |
+| late `tool_result`, `job_result` | a text block `<job call="…" name="…" status="…" ran="Ns">`, the result's text, `</job>`, with the result's non-text blocks after it |
+| `tool_pending` (protocol 1), `state: running` | `tool_result`: `Still running in the background (pid N, its own process group); its output so far is in OUT and ERR. Its result arrives later as a message.`, plus `Its stdin is open: send it input with the job tool, id "ID".` when `stdin_open`; any other state: `Not finished yet; its result arrives later as a message.` |
 | adjacent user messages | merged; `tool_result` blocks first |
 | `document` `name` | its `title` |
 | `x-*` blocks, `x-*` fields | dropped; a message without them or a `document` `name` is sent as stored |
@@ -331,9 +340,9 @@ Rendering, message by message:
 | `image`, `document` | `input_image` with a `data:` URL; `input_file` with `filename` the block's `name`, else `document`, and `file_data` |
 | `tool_use` | `function_call` with `call_id` and `arguments`; `"{}"` when `input` is not an object |
 | `tool_result` | `function_call_output`: a string for one text block, else a list of input parts |
-| `tool_pending` | `function_call_output` with the `anthropic` wording |
-| `job_result` | a user message: `input_text` with the `<job …>` text, then its media |
-| call answers | before the rest of their user message |
+| a call still running, `tool_pending` | `function_call_output` with the `anthropic` wording |
+| late `tool_result`, `job_result` | a user message: `input_text` with the `<job …>` text, then its media |
+| call answers | in call order, before the rest of their user message |
 | `text` (assistant) | an assistant message, with `phase` from `x-openai-phase` |
 | `x-openai` | its `item`, as received |
 | `thinking`, `redacted_thinking`, unknown blocks | dropped |
@@ -354,7 +363,7 @@ model treats every call, so pending calls and job results are text as in
 output token. `--models` lists `echo`.
 
 Without `MOCK_SCRIPT`, it answers the last message of the request (its last
-text block, and the first text of its first `tool_result` or `job_result`):
+text block, and the first text of its first `tool_result`):
 
 | Last text | Response |
 |---|---|

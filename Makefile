@@ -14,6 +14,7 @@ SYSTEM     = $(BUILD_ROOT)/system
 SHARED     = $(OBJ)/shared/json.o $(OBJ)/shared/bytes.o
 KERNEL     = $(patsubst %,$(OBJ)/akern/%.o,main loop input turns calls tools inbox proc session output message) $(SHARED)
 FILE_TOOLS = $(BIN)/akern-edit
+FRONT_ENDS = $(BIN)/akern-acp
 PROVIDERS  = $(patsubst %,$(SYSTEM)/providers/%,mock anthropic claude-code openai)
 PROTOCOL   = $(OBJ)/providers/provider.o $(SHARED)
 ANTHROPIC  = $(OBJ)/providers/anthropic_messages.o $(OBJ)/providers/media.o $(PROTOCOL)
@@ -21,7 +22,7 @@ HTTP       = $(OBJ)/providers/http.o $(PROTOCOL)
 SCRIPTS    = $(patsubst tools/%,$(BIN)/%,$(filter-out %.c,$(wildcard tools/akern-*)))
 SKILLS     = $(patsubst %,$(SYSTEM)/%,$(wildcard skills/*/*))
 DATA       = $(SKILLS) $(SYSTEM)/render.jq $(SYSTEM)/system-prompt $(SYSTEM)/base-prompt.md $(SYSTEM)/tools.json $(SYSTEM)/README.md
-PROGRAMS   = $(BIN)/akern $(FILE_TOOLS)
+PROGRAMS   = $(BIN)/akern $(FILE_TOOLS) $(FRONT_ENDS)
 VENV       = build/venv
 PYTEST     = $(VENV)/bin/pytest
 
@@ -37,6 +38,9 @@ $(BIN)/akern: $(KERNEL)
 
 $(FILE_TOOLS): $(BIN)/%: $(OBJ)/tools/%.o
 	$(LINK) $^
+
+$(BIN)/akern-acp: $(OBJ)/tools/akern-acp.o $(SHARED)
+	$(LINK) $^ -lm
 
 $(SYSTEM)/providers/mock: $(OBJ)/providers/mock.o $(PROTOCOL)
 	$(LINK) $^

@@ -55,5 +55,5 @@ A wrapping provider can run the built-in one: `exec ~/.akern/system/providers/an
   change the prompt itself, write your own executable `system-prompt`; it can run
   `system/system-prompt` and add to its output.
 - Programs (`akern`, `akern-edit`,
-  `akern-cli`, `akern-model`) are installed
+  `akern-cli`, `akern-model`, `akern-acp`) are installed
   on `PATH`, not here. To replace one, put your version earlier on `PATH`.

@@ -18,6 +18,8 @@ Why C99? It's a sort of fun aesthetic / nostalgic choice. For a tiny project lik
 
 The goal is feature parity with the [pi](https://github.com/earendil-works/pi) coding harness, reached by composition of trivial user-replacable scripts and binaries.
 
+Editors and hosts that speak the Agent Client Protocol (Zed, Omnigent) run it through `akern-acp`.
+
 In some ways we already exceed base pi capabilities. Concurrent tool calls and recursive sub-agent calls come for free with the subprocess design.
 
 `akern` exposes 3 tool calls to models: `shell` (bash, or sh where there is no bash), `job` and `edit`. Reading and writing files is `cat` in the shell, with the text on stdin. `job` exists because only the kernel holds a running program's stdin pipe and process group: it sends input, end of input and signals, and waits for a job to end. `edit` exists because models are trained on it. `shell` and `edit` run the program `tools.json` names, so you can swap it out.
@@ -62,6 +64,6 @@ See [tools.md §3](docs/tools.md#install) for details.
 | [docs/akern.md](docs/akern.md) | the kernel process: environment, arguments, stdin commands, stdout events, session files |
 | [docs/turn.md](docs/turn.md) | one typed prompt with two tool calls, step by step: the processes and events |
 | [docs/providers.md](docs/providers.md) | `providers/`: the request, the event stream, errors, the message schema; anthropic, claude-code, openai, mock |
-| [docs/tools.md](docs/tools.md) | `tools/` and `skills/`: `shell`, `job`, `edit`, programs on `PATH`, skills, the `akern-cli` front end |
+| [docs/tools.md](docs/tools.md) | `tools/` and `skills/`: `shell`, `job`, `edit`, programs on `PATH`, skills, the `akern-cli` and `akern-acp` front ends |
 | [docs/pi-parity.md](docs/pi-parity.md) | every pi feature mapped to the mechanism that provides it here |
 | [docs/roadmap.md](docs/roadmap.md) | remaining work and open questions |

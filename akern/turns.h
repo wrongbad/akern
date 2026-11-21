@@ -71,6 +71,8 @@ void turns_append_leftover_results(turns *d);
 void turns_put_status(const turns *d, json_buf *status);
 /* True when idle, with nothing due and no job running. */
 bool turns_is_quiescent(const turns *d);
+/* The latest run's number; 0 before the first. */
+int turns_get_run(const turns *d);
 /* True once a run has started. */
 bool turns_has_run(const turns *d);
 /* 1 if the last run ended in error, else 0. */

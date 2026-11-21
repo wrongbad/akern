@@ -192,8 +192,9 @@ static void build_request(turns *d, json_buf *request)
     session_read_context(d->session, &messages, &d->context_ids);
     json_printf(
         request,
-        "{'model':%s,'system':%S,'messages':%R,'tools':%R,'params':{%r}}",
+        "{'model':%s,'session':%s,'system':%S,'messages':%R,'tools':%R,'params':{%r}}",
         model_id(d),
+        d->config->session_path,
         d->system.n ? buf_span(&d->system) : NOSPAN,
         buf_span(&messages),
         calls_get_tool_schemas(d->calls),
@@ -692,6 +693,11 @@ bool turns_is_quiescent(const turns *d)
 {
     return d->state == S_IDLE && !d->abort_requested && !inbox_has_due(d->inbox, WHEN_ANY) &&
            calls_count_running_jobs(d->calls) == 0;
+}
+
+int turns_get_run(const turns *d)
+{
+    return d->run;
 }
 
 bool turns_has_run(const turns *d)

@@ -78,7 +78,7 @@ the system-prompt program know nothing of either.
 | `input` not a JSON object | error: `input is not a JSON object: ` and the text, clipped to 200 bytes (`…` when clipped) |
 | `shell` without `command`, `job` without `id`, `edit` without `path` | error: `command is required`, `id is required`, `path is required`; nothing runs |
 
-Every result is a `tool_result` (or, for a job, a later `job_result`) with a
+Every result is a `tool_result` (for a job, a late one, which also names how it ended) with a
 block array as `content`; an empty text becomes `(empty)`. How calls run in
 parallel, wake the turn and become jobs: [calls.h](../akern/calls.h) and **Jobs** below.
 
@@ -156,12 +156,13 @@ alone, e.g. `[exit 1; 48213 bytes of image/png not shown]`: the bytes may be
 cut short, and a provider refuses a broken image. A block the API rejects is replaced with a note in the session
 ([akern.md](akern.md#session-file)).
 
-**Jobs.** A call answered with a `tool_pending`, or started with
-`wait: 0`, is a job named by its call id. From the moment it is answered
-pending (or starts) its output is
+**Jobs.** A call still running when its turn is answered (its `wait` ran
+out, or a message arrived first), or started with `wait: 0`, is a job named by
+its call id. From the moment it is answered pending (or starts) its output is
 written whole to `<session>.d/calls/<call>.out` (output that already spilled
-keeps its file), and the `tool_pending` names it with the pid. The model watches with `tail`, acts on it with [job](#job), and waits by
-ending its turn (the `job_result` starts a new one) or with `job`'s `wait`. Its output is also forwarded live as `tool_progress` events, except an image's or PDF's.
+keeps its file). The provider tells the model so in a placeholder answer that
+names the job and that file ([providers.md §5](providers.md#5-messages)). The model watches with `tail`, acts on it with [job](#job), and waits by
+ending its turn (its late result starts a new one) or with `job`'s `wait`. Its output is also forwarded live as `tool_progress` events, except an image's or PDF's.
 
 **Limit.** A call that would run more than `--max-processes` programs at
 once fails at once, with status `not run` and the text
@@ -177,7 +178,7 @@ kernel: it starts no program and counts against no limit. In order:
 | `stdin` | appends the text to the job's stdin, after anything still queued there; the job must have been started with `eof: false` |
 | `eof` | `true`: closes the job's stdin after that, so the program sees EOF |
 | `signal` | sends a signal to the job's process group: `HUP`, `INT`, `QUIT`, `KILL`, `USR1`, `USR2`, `TERM`, `STOP`, `CONT` (with or without `SIG`), or a number. The job's result still arrives |
-| `wait` | seconds to wait for the job to end. It stays a job either way: when it ends, its `job_result` arrives in the same message as this call's reply |
+| `wait` | seconds to wait for the job to end. It stays a job either way: when it ends, its late result arrives in the same message as this call's reply |
 
 | Reply | When |
 |---|---|
@@ -190,7 +191,7 @@ kernel: it starts no program and counts against no limit. In order:
 | `Unknown signal: X` | nothing is done |
 
 A `job` call with `wait` is a call like any other: a message that arrives
-first answers it pending, and its own `job_result` follows. The job's stdin
+first answers it pending, and its own late result follows. The job's stdin
 pipe never leaves the kernel. It is anonymous: only the kernel holds its write
 end, so there is nothing to clean up. It is the handle POSIX gives the parent,
 which is why the kernel writes for the model rather than exposing the job's
@@ -376,8 +377,8 @@ The model, exported as `AKERN_MODEL`, is the first that is set:
 |---|---|
 | `text_delta` | the text |
 | `tool_start` | `▸ NAME INPUT`, dim |
-| `message` with `tool_pending` blocks | `↳ ID keeps running` per block, dim |
-| `tool_end` | `✓ CALL STATUS`, plus ` (error)`, dim |
+| `turn_start`, `run_end` | `↳ ID keeps running` for each call started and not answered, once, dim |
+| `block` with a `tool_result` | `✓ CALL`, plus ` (error)`, dim |
 | `preempt` | `⏸ interrupted`, yellow |
 | `interrupt` | `(press Ctrl-C again within Ns to quit)`, dim |
 | `notice` | `[SOURCE] MESSAGE`, yellow |
@@ -390,7 +391,7 @@ Whenever it changes, a dim status line follows, on a line of its own:
 | Status | When |
 |---|---|
 | `… working` | between `run_start` and `run_end`; from the start when a prompt was given |
-| `⏵ N jobs running · waiting for input` | otherwise, while some `tool_pending` has no `job_result` yet |
+| `⏵ N jobs running · waiting for input` | otherwise, while some call has a `tool_start` and no `block` yet |
 | `› waiting for input` | otherwise |
 
 ### akern-model
@@ -440,3 +441,104 @@ claude-code/opus
 | 0 | the saved `provider/model` on stdout |
 | 1 | no terminal: on stderr, `akern-model: no model set`, or `akern-model: no terminal` when `$AKERN_HOME/model` exists. No provider: `akern-model: no provider in HOME/providers or HOME/system/providers`. None ready: the list, then `akern-model: no provider is ready`. Ctrl-D at a prompt: nothing saved |
 | 2 | other arguments: the usage line on stderr |
+
+## 5. The akern-acp front end
+
+`tools/akern-acp.c`, for editors and hosts that speak the
+[Agent Client Protocol](https://agentclientprotocol.com) (Zed, Omnigent's
+`acp:` agents): JSON-RPC 2.0 lines on stdin and stdout. It runs one `akern`
+per ACP session and translates; it adds no behavior of its own.
+
+```
+akern-acp [--until run|settled] [--background hold|send] [--sessions DIR] [-- akern args...]
+```
+
+| ACP | akern |
+|---|---|
+| `initialize` | protocol 1; `loadSession`, images and embedded resources in prompts; no auth methods |
+| `session/new` | `akern -s DIR/ID.jsonl [args]` in the session's `cwd`, answered once `hello` arrives. `models`: the current model, then the others its provider lists with `--models` (asked once per provider, within 10 s), as `PROVIDER/ID`. `configOptions`: `effort`, category `thought_level`, a choice of `default`, `low`, `medium`, `high`. A client-chosen `sessionId` of letters, digits, `-` and `_` is kept. `mcpServers` are ignored, with a line on stderr: akern has no MCP client |
+| `session/load` | replays the file's chain from the head as `user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk`, `tool_call` and `tool_call_update`, then starts `akern` on it, without `AKERN_MODEL`, so it keeps the model it has; answered like `session/new` |
+| `session/prompt` | `send`: text as text, images as images, a `resource` as `<resource uri="…">` text, a `resource_link` as `@URI` |
+| `session/cancel` | `abort` (jobs keep running); the prompt ends `cancelled` |
+| `session/set_model`, `session/set_config_option` (`model`) | `append` of a `settings` entry with the model |
+| `session/set_config_option` (`effort`) | `append` of a `settings` entry whose `params` are `{"effort": LEVEL}`, or none for `default`; then a `config_option_update` |
+| a prompt that is only `/model`, `/model ID`, `/effort` or `/effort LEVEL` | answered by `akern-acp` and never sent to the model, for clients with no model or effort control of their own (Omnigent): `/model` lists the provider's models, `/model ID` switches (a bare id stays with the current provider), `/effort` sets the param as the option does, any value the provider takes |
+
+| akern event | ACP `session/update` |
+|---|---|
+| `text_delta`; an assistant `message` whose text was not streamed | `agent_message_chunk` |
+| `thinking_delta` | `agent_thought_chunk` |
+| `tool_start` | `tool_call`, `in_progress`: `title` the command (or `edit PATH`, `job ID`), `kind` `execute`, `edit` or `other`, `rawInput` the input; an edit adds its absolute path as `locations` and a `diff` |
+| `tool_progress` | `tool_call_update`, `in_progress`: the last 16 KiB of output, fenced, at most every 0.25 s |
+| `block` with a `tool_result` | `tool_call_update`, `completed` or `failed` (`is_error`): its text fenced for `shell`, its images, an edit's diff first; `rawOutput` the block |
+
+A prompt is answered when akern has dealt with it, with `stopReason`
+`end_turn` (`cancelled` after a cancel or an abort) and `usage`
+(`inputTokens`, `outputTokens`, `cachedReadTokens`, `cachedWriteTokens`,
+`totalTokens`) summed over its turns. A run that ends in `error` answers it with
+a JSON-RPC error, `data` the run's error.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--until` | `run` | `run`: at the `run_end` of the run that took the prompt, so a client waits only for the model. `settled`: at `settled`, so a prompt also waits for its jobs and the runs their results start |
+| `--background` | `hold` | what akern does while no prompt is open (a job ends and wakes the model): `hold` keeps those updates and sends them first when the next prompt starts, since many clients drop updates outside a prompt; `send` sends them at once |
+| `--sessions` | `$AKERN_ACP_SESSIONS`, else `$XDG_STATE_HOME/akern/acp`, else `~/.local/state/akern/acp` | where session files go; a restarted `akern-acp` loads them by id |
+| after `--` | | passed to every `akern`, after `-s`: `-m`, `-P`, `-S`, limits |
+
+### Protocol 2
+
+A client that asks `initialize` for `protocolVersion` 2 or more gets protocol 2,
+the [v2 draft](https://agentclientprotocol.com/rfds/v2/overview); 1 gets the
+above. The draft may still change. Protocol 2 has no prompt to hold work for, so
+akern's concurrency shows as it is: `--until` and `--background` do not apply.
+
+| ACP 2 | akern |
+|---|---|
+| `initialize` | protocol 2, `info`, `capabilities.session` with images and embedded resources in prompts; no auth methods |
+| `session/new` | as protocol 1; `configOptions` are `model` (category `model`: the current model and the ones its provider lists) and `effort`; `availableCommands` are `model` and `effort` |
+| `session/resume` | starts `akern` on the file, then a `state_update` (`idle`) and a `session_info_update` with the title. `replayFrom: {"type":"start"}` first replays the chain as whole `user_message`, `agent_message`, `agent_thought` and `tool_call_update`s, each by its entry id, then `replay_complete`. A call the file leaves open is `failed`: the akern that ran it is gone |
+| `session/list` | the files in `--sessions` whose header `cwd` is the one asked for: title from the last `name` entry, else the first prompt's first line; `updatedAt` the file's mtime |
+| `session/close` | `abort` with `jobs`, then stdin closed; answered once `akern` has exited |
+| `session/prompt` | `send`, at any time: answered `{"messageId"}` at its `ok`, then a `user_message`. While a run works it steers it: `when` `turn`, delivered at its next turn. `_meta` `io.github.wrongbad.akern/when` picks another [delivery mode](akern.md#delivery-modes) (`now` preempts the streaming turn) |
+| `session/cancel` | `abort`, of the run and of a prompt not yet taken; jobs keep running. On a child session: `SIGTERM` to the call that runs it |
+| `tool_call/cancel`, `terminal/cancel` | `SIGTERM` to the call's process group; its result closes it `cancelled` |
+| `session/set_config_option` | `model` or `effort` (`type` `id`), as in protocol 1 |
+| `/model`, `/effort` prompts | as in protocol 1, run from idle to idle, the prompt a live-only `user_message` |
+
+| akern event | ACP 2 `session/update` |
+|---|---|
+| `run_start` | `state_update` `running` |
+| `run_end` | `state_update` `idle`, `stopReason` `end_turn`, `cancelled` (aborted, or after a cancel) or `error` with `error.data` the run's error; `_meta` `io.github.wrongbad.akern/usage` the run's usage summed |
+| either | `background`: each call still open from an earlier run (a job), as a `tool_call`, and a `subagent` when it runs one |
+| `text_delta`, `thinking_delta` | `agent_message_chunk`, `agent_thought_chunk`, by a `messageId` for the turn |
+| an assistant `message` | `agent_thought` and `agent_message` with its whole content, by the same id |
+| `tool_start` | `tool_call_update` creating the call, `in_progress`, as in protocol 1. A `shell` call that started is also a terminal: `terminal_update` with its `command` and `cwd`, and `{"type":"terminal"}` content. A call with a process has `capabilities.cancel`. An edit's content is a `diff` with its file in `changes` |
+| `tool_progress` | `terminal_output_chunk`, base64, at most every 0.25 s or past 1 MiB |
+| `block` with a `tool_result` | `tool_call_update` `completed`, `failed`, or `cancelled` (killed by an abort or a `tool_call/cancel`). A terminal gets `exitStatus` from its result's header. An edit's `diff` gains a `git_patch`: where its new text now is, widened to whole lines, when it is there once |
+
+A job runs on after its run: its updates come when they happen, and when it
+ends its result starts a run of its own, `running` then `idle` with no prompt.
+
+A `shell` call whose command runs `akern … -s FILE` (a sub-agent, [akern.md
+§5](akern.md#sub-agents)) is a child session, `SESSION/PATH` with `PATH` the file
+relative to the session's directory without `.jsonl`. It is announced with
+`subagent_update` (`running`) before the call that names it in a
+`{"type":"session"}` content item, and the file is read every 0.2 s while the
+call runs: its user text is a `session_message` from the parent, its assistant
+messages `agent_message` and `agent_thought`, its calls `tool_call_update`s,
+its own sub-agents children of the child. When the call ends, the file is read
+once more, and the child goes `idle`: `end_turn`, `error`, or `cancelled`.
+The same file run again is the same child.
+
+The model is `AKERN_MODEL`, else the first line of `$AKERN_HOME/model`, as for
+`akern-cli`. akern's stderr goes to `akern-acp`'s, each line prefixed
+`akern[ID]:`; when a session cannot start, the prompt or `session/new` fails
+with it.
+
+Zed, in `settings.json`:
+
+```json
+{"agent_servers": {"akern": {"command": "akern-acp", "args": []}}}
+```
+
+Omnigent, as a user-configured ACP agent (`acp:akern`).

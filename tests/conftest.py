@@ -51,9 +51,22 @@ def seen(type, n=1):
 
 
 def seen_pending(n=1):
-    """A condition: `n` calls have been delivered as still running."""
-    return lambda run: sum(b["type"] == "tool_pending" for e in run.events_of("message")
-                           for b in _blocks(e["message"])) >= n
+    """A condition: `n` calls have become jobs (still running when a later turn started or the run ended)."""
+    return lambda run: len(pending_calls(run.events)) >= n
+
+
+def pending_calls(events):
+    """The tool_start events of calls still running, without a result, when a later turn started
+    or their run ended: the calls the model was answered pending."""
+    started, answered, pending = [], set(), []
+    for e in events:
+        if e["type"] == "tool_start":
+            started.append(e)
+        elif e["type"] == "block":
+            answered.add(e["block"].get("tool_use_id"))
+        elif e["type"] in ("turn_start", "run_end"):
+            pending += [s for s in started if s["call"] not in answered and s not in pending]
+    return pending
 
 
 def signal_when(*steps):
@@ -117,13 +130,13 @@ class Run:
 
     @property
     def tool_results(self):
-        """Results delivered in the turn of their call."""
-        return [b for m in self.messages for b in _blocks(m) if b["type"] == "tool_result"]
+        """Results delivered in the turn of their call (a late one also has a status)."""
+        return [b for m in self.messages for b in _blocks(m) if b["type"] == "tool_result" and "status" not in b]
 
     @property
     def pending(self):
-        """Calls still running when the next request went out."""
-        return [b for m in self.messages for b in _blocks(m) if b["type"] == "tool_pending"]
+        """The tool_start events of calls still running when the next request went out."""
+        return pending_calls(self.events)
 
     @property
     def result_texts(self):
@@ -148,7 +161,7 @@ class Run:
     @property
     def job_reports(self):
         """Late results of pending calls, as (block, its text read by parse_shell when it has a header) pairs."""
-        late = [b for m in self.messages for b in _blocks(m) if b["type"] == "job_result"]
+        late = [b for m in self.messages for b in _blocks(m) if b["type"] == "tool_result" and "status" in b]
         return [(b, _shell_or_text(b["content"][0]["text"])) for b in late]
 
     def violations(self):

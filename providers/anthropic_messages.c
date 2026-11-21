@@ -86,14 +86,20 @@ static bool has_named_document(json content)
 
 static void put_plain(json_buf *out, json block);
 
-static void put_fields(json_buf *out, json object, const char *dropped)
+/* A field the kernel keeps beside a tool_result's API fields (akern.md §5). */
+static bool is_result_fact(json k)
+{
+    return json_eq(k, "name") || json_eq(k, "status") || json_eq(k, "ran");
+}
+
+static void put_fields(json_buf *out, json object, bool drop_result_facts)
 {
     jiter it = json_iter(object);
     bool first = true, document = json_eq(json_get(object, "type"), "document");
     buf_putc(out, '{');
     for (json k, v; json_next(&it, &k, &v);)
     {
-        if (is_extension(k) || (dropped && json_eq(k, dropped)))
+        if (is_extension(k) || (drop_result_facts && is_result_fact(k)))
             continue;
         if (document && json_eq(k, "name"))
             json_printf(out, "%r\"title\":%R", first ? "" : ",", v);
@@ -115,7 +121,7 @@ static void put_fields(json_buf *out, json object, const char *dropped)
 static void put_plain(json_buf *out, json block)
 {
     if (has_extension_field(block) || is_named_document(block))
-        put_fields(out, block, NULL);
+        put_fields(out, block, false);
     else
         buf_putspan(out, block);
 }
@@ -170,33 +176,7 @@ static void put_tool_result(json_buf *out, json result, long message, long index
     long inner = 0;
     for (json block; json_next(&it, NULL, &block); inner++)
         note_media(block, inner, (block_at){message, index, inner});
-    put_fields(out, result, "name");
-}
-
-static bool answers_call(json block)
-{
-    json type = json_get(block, "type");
-    return json_eq(type, "tool_pending") || json_eq(type, "tool_result");
-}
-
-static void put_user_block(json_buf *out, json block, long message, long index)
-{
-    json type = json_get(block, "type");
-    if (is_extension(type))
-        return;
-    if (json_eq(type, "job_result"))
-    {
-        put_job_result(out, block, message, index);
-        return;
-    }
-    json_put_comma_unless_first(out);
-    if (json_eq(type, "tool_pending"))
-        put_pending(out, block);
-    else if (json_eq(type, "tool_result"))
-        put_tool_result(out, block, message, index);
-    else
-        note_media(block, -1, (block_at){message, index, -1}), put_plain(out, block);
-    st.rendered_block++;
+    put_fields(out, result, true);
 }
 
 static bool is_user(json message)
@@ -204,15 +184,85 @@ static bool is_user(json message)
     return json_eq(json_get(message, "role"), "user");
 }
 
-typedef enum { OTHER_BLOCKS, CALL_ANSWERS } user_block_group;
-
-static void put_user_blocks(json_buf *out, jiter messages, long message, user_block_group group)
+static void put_placeholder(json_buf *out, json tool_use)
 {
-    bool answers = group == CALL_ANSWERS;
+    buf text = {0};
+    provider_describe_unanswered(&text, tool_use);
+    json_put_comma_unless_first(out);
+    json_printf(
+        out,
+        "{'type':'tool_result','tool_use_id':%R,'content':[{'type':'text','text':%S}]}",
+        json_get(tool_use, "id"),
+        buf_span(&text)
+    );
+    st.rendered_block++;
+    buf_free(&text);
+}
+
+/* What one merged user message has answered so far: the ids of the tool_result blocks it sends
+   as results, so the others, late ones, go as text. */
+typedef struct {
+    json *ids;
+    size_t n, cap;
+} answered;
+
+static void put_user_block(json_buf *out, json block, long message, long index)
+{
+    json type = json_get(block, "type");
+    if (is_extension(type))
+        return;
+    if (json_eq(type, "job_result") || json_eq(type, "tool_result"))
+    {
+        put_job_result(out, block, message, index);
+        return;
+    }
+    json_put_comma_unless_first(out);
+    note_media(block, -1, (block_at){message, index, -1}), put_plain(out, block);
+    st.rendered_block++;
+}
+
+/* The answer to one open call in the user messages from `messages` on: its tool_result, else
+   its tool_pending (protocol 1), else a placeholder. */
+static void put_answer(json_buf *out, jiter messages, long message, json tool_use, answered *done)
+{
+    json id = json_get(tool_use, "id");
+    for (json m; json_next(&messages, NULL, &m) && is_user(m); message++)
+    {
+        jiter it = json_iter(json_get(m, "content"));
+        long index = 0;
+        for (json block; json_next(&it, NULL, &block); index++)
+        {
+            json type = json_get(block, "type");
+            bool result = json_eq(type, "tool_result");
+            if ((!result && !json_eq(type, "tool_pending")) ||
+                !ids_contain(&id, 1, json_get(block, "tool_use_id")))
+                continue;
+            VEC_PUSH(done->ids, done->n, done->cap, id);
+            json_put_comma_unless_first(out);
+            if (result)
+                put_tool_result(out, block, message, index);
+            else
+                put_pending(out, block);
+            st.rendered_block++;
+            return;
+        }
+    }
+    put_placeholder(out, tool_use);
+}
+
+/* The content of the user messages from `messages` on, merged: first an answer to each open call,
+   in call order, then everything else, late results as text. */
+static void put_user_content(json_buf *out, jiter messages, long message, open_calls *oc)
+{
+    static answered done;
+    done.n = 0;
+    for (size_t i = 0; i < oc->n; i++)
+        put_answer(out, messages, message, oc->uses[i], &done);
+    oc->n = 0;
     for (json m; json_next(&messages, NULL, &m) && is_user(m); message++)
     {
         json content = json_get(m, "content");
-        if (json_is(content, '"') && !answers)
+        if (json_is(content, '"'))
         {
             json_put_comma_unless_first(out),
                 json_printf(out, "{'type':'text','text':%R}", content);
@@ -221,8 +271,13 @@ static void put_user_blocks(json_buf *out, jiter messages, long message, user_bl
         jiter it = json_iter(content);
         long index = 0;
         for (json block; json_next(&it, NULL, &block); index++)
-            if (answers_call(block) == answers)
+        {
+            json type = json_get(block, "type");
+            bool answer = json_eq(type, "tool_result") &&
+                          ids_contain(done.ids, done.n, json_get(block, "tool_use_id"));
+            if (!answer && !json_eq(type, "tool_pending"))
                 put_user_block(out, block, message, index);
+        }
     }
 }
 
@@ -272,10 +327,25 @@ static void put_assistant(json_buf *out, json message)
     buf_puts(out, "]}");
 }
 
+/* A user message of placeholders only, for calls no user message follows. */
+static void put_placeholder_message(json_buf *out, open_calls *oc)
+{
+    st.rendered_block = 0;
+    json_put_comma_unless_first(out);
+    buf_puts(out, "{\"role\":\"user\",\"content\":[");
+    for (size_t i = 0; i < oc->n; i++)
+        put_placeholder(out, oc->uses[i]);
+    buf_puts(out, "]}");
+    oc->n = 0;
+    st.rendered_message++;
+}
+
 static void put_rendered_messages(json_buf *out, json messages)
 {
+    static open_calls oc;
     jiter it = json_iter(messages), at = it;
     bool merging = false;
+    oc.n = 0;
     buf_putc(out, '[');
     for (long index = 0; json_next(&it, NULL, &messages); at = it, index++)
     {
@@ -283,21 +353,25 @@ static void put_rendered_messages(json_buf *out, json messages)
         if (user && merging)
             continue;
         merging = user;
+        if (!user && oc.n)
+            put_placeholder_message(out, &oc);
         st.rendered_block = 0;
         json_put_comma_unless_first(out);
         if (user)
         {
             buf_puts(out, "{\"role\":\"user\",\"content\":[");
-            put_user_blocks(out, at, index, CALL_ANSWERS);
-            put_user_blocks(out, at, index, OTHER_BLOCKS);
+            put_user_content(out, at, index, &oc);
             buf_puts(out, "]}");
         }
         else
         {
             put_assistant(out, messages);
+            open_calls_set(&oc, messages);
         }
         st.rendered_message++;
     }
+    if (oc.n)
+        put_placeholder_message(out, &oc);
     buf_putc(out, ']');
 }
 

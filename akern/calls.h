@@ -2,9 +2,10 @@
    each shell and edit call as its tool's program, starting it at once or refusing it past
    --max-processes, keeping its output and spilling it to files in <session>.d/calls; the job
    tool (input, end of input, a signal, a wait); killing jobs, answering each call of the turn,
-   and queueing a job's job_result in the inbox when it ends. Processes are proc's; when the
+   and queueing a job's late tool_result in the inbox when it ends. Processes are proc's; when the
    turn is answered is turns'.
-   job = a call answered with tool_pending, or started with wait: false, named by its call id;
+   job = a call still running when its turn was answered, or started with wait: false, named by
+   its call id;
    the turn is settled when every waited call has finished. */
 
 #ifndef CALLS_H
@@ -36,7 +37,8 @@ bool calls_advance(calls *cs);
 bool calls_is_turn_settled(const calls *cs);
 /* Kills the turn's unfinished waited calls; wait: false ones keep running. */
 void calls_abort_turn(calls *cs);
-/* Adds each turn call's tool_result or tool_pending; empties the turn. */
+/* Adds the tool_result of each turn call that has ended; the others become jobs, answered when
+   they end. Empties the turn. */
 void calls_take_turn_results(calls *cs, json_list *blocks);
 /* Terminates every job that has a process. */
 void calls_kill_jobs(calls *cs);

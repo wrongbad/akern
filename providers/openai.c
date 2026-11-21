@@ -159,39 +159,87 @@ static void put_call_answer(json_buf *out, json block, block_at at)
     buf_putc(out, '}');
 }
 
-static bool answers_call(json block)
+static void put_placeholders(json_buf *out, open_calls *oc)
 {
-    return is_type(block, "tool_result") || is_type(block, "tool_pending");
+    for (size_t i = 0; i < oc->n; i++)
+    {
+        buf text = {0};
+        provider_describe_unanswered(&text, oc->uses[i]);
+        start_item(out);
+        json_printf(
+            out,
+            "{'type':'function_call_output','call_id':%R,'output':%S}",
+            json_get(oc->uses[i], "id"),
+            buf_span(&text)
+        );
+        buf_free(&text);
+    }
+    oc->n = 0;
 }
 
-static void put_user(json_buf *out, json message, long index)
+/* The answer to each open call, in call order: its tool_result in the message, else its
+   tool_pending (protocol 1), else a placeholder. The ids answered go in done. */
+static void put_answers(json_buf *out, json content, long index, open_calls *oc, json **done,
+                        size_t *ndone, size_t *capdone)
 {
+    for (size_t i = 0; i < oc->n; i++)
+    {
+        json id = json_get(oc->uses[i], "id");
+        block_at at = {index, 0, -1};
+        jiter it = json_iter(content);
+        bool found = false;
+        for (json block; !found && json_next(&it, NULL, &block); at.block++)
+            if ((is_type(block, "tool_result") || is_type(block, "tool_pending")) &&
+                ids_contain(&id, 1, json_get(block, "tool_use_id")))
+            {
+                put_call_answer(out, block, at);
+                VEC_PUSH(*done, *ndone, *capdone, id);
+                found = true;
+            }
+        if (!found)
+        {
+            open_calls one = {&oc->uses[i], 1, 1};
+            put_placeholders(out, &one);
+        }
+    }
+    oc->n = 0;
+}
+
+/* The answers to the open calls, then a user message with everything else; a tool_result for a
+   call answered before (a late one) goes there as text. */
+static void put_user(json_buf *out, json message, long index, open_calls *oc)
+{
+    static json *done;
+    static size_t ndone, capdone;
     json content = json_get(message, "content");
     block_at at = {index, 0, -1};
+    ndone = 0;
+    put_answers(out, json_is(content, '[') ? content : S("[]"), index, oc, &done, &ndone, &capdone);
     if (json_is(content, '"'))
     {
         start_item(out);
         json_printf(out, "{'role':'user','content':[{'type':'input_text','text':%R}]}", content);
         return;
     }
-    jiter it = json_iter(content);
     bool others = false;
-    for (json block; json_next(&it, NULL, &block); at.block++)
-        if (answers_call(block))
-            put_call_answer(out, block, at);
-        else
-            others = true;
+    jiter it = json_iter(content);
+    for (json block; json_next(&it, NULL, &block);)
+        others |= !is_type(block, "tool_pending") &&
+                  !(is_type(block, "tool_result") && ids_contain(done, ndone, json_get(block, "tool_use_id")));
     if (!others)
         return;
     start_item(out);
     buf_puts(out, "{\"role\":\"user\",\"content\":[");
     it = json_iter(content);
-    at.block = 0;
     for (json block; json_next(&it, NULL, &block); at.block++)
-        if (is_type(block, "job_result"))
+    {
+        bool answered = is_type(block, "tool_pending") ||
+                        (is_type(block, "tool_result") && ids_contain(done, ndone, json_get(block, "tool_use_id")));
+        if (is_type(block, "job_result") || (is_type(block, "tool_result") && !answered))
             put_job_parts(out, block, at);
-        else if (!answers_call(block))
+        else if (!answered)
             put_part(out, block, at);
+    }
     buf_puts(out, "]}");
 }
 
@@ -249,11 +297,18 @@ static void put_input(json_buf *out, json messages)
     jiter it = json_iter(buf_span(&limited));
     buf_putc(out, '[');
     long index = 0;
+    static open_calls oc;
+    oc.n = 0;
     for (json message; json_next(&it, NULL, &message); index++)
         if (json_eq(json_get(message, "role"), "user"))
-            put_user(out, message, index);
+            put_user(out, message, index, &oc);
         else
+        {
+            put_placeholders(out, &oc);
             put_assistant(out, message);
+            open_calls_set(&oc, message);
+        }
+    put_placeholders(out, &oc);
     buf_putc(out, ']');
     buf_free(&limited);
 }

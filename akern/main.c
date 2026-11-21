@@ -258,7 +258,7 @@ int main(int argc, char **argv)
     turns_apply_startup_settings(&k.turns);
     output_emit(
         &k.output,
-        "{'type':'hello','protocol':1,'session':%s,'head':%s,'model':%s}",
+        "{'type':'hello','protocol':2,'session':%s,'head':%s,'model':%s}",
         k.config.session_path,
         session_get_head_id(&k.session),
         k.turns.provider_model

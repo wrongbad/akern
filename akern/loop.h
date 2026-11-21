@@ -25,7 +25,7 @@ typedef struct poll_set {
 typedef struct loop {
     poll_set watched;
     int signal_fd;
-    bool stopping;
+    bool stopping, settled;
     int exit_code;
     double last_sigint_at;
     const config *config;

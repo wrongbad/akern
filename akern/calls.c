@@ -44,7 +44,7 @@ typedef struct call {
     json_buf input;
     int run, turn;
     call_state state;
-    bool in_turn, wait, delivers_late, killed, overflowed;
+    bool in_turn, wait, delivers_late, killed, overflowed, announced;
 
     worker *proc;
     char *program, *media_type, *media_name;
@@ -111,24 +111,77 @@ static long long ran_seconds(const call *c)
     return c->launched_at ? (long long)(c->ended_at - c->launched_at + 0.5) : 0;
 }
 
+/* A call's tool_result. One delivered after its turn, a job's, also names its tool, how it ended
+   and how long it ran, for providers that word it as text (providers.md §5). */
+static void put_result_block(const call *c, json_list *blocks)
+{
+    if (!c->delivers_late)
+    {
+        blocks_add_tool_result(blocks, c->id, c->is_error, buf_span(&c->result));
+        return;
+    }
+    json_printf(
+        blocks,
+        "%r{'type':'tool_result','tool_use_id':%s,'is_error':%b,'content':%R,'name':%s,'status':%S,"
+        "'ran':%D}",
+        blocks->n ? "," : "",
+        c->id,
+        c->is_error,
+        buf_span(&c->result),
+        c->tool_name,
+        buf_span(&c->status),
+        ran_seconds(c)
+    );
+}
+
 static void queue_job_result(call *c)
 {
-    json_buf block = {0}, content = {0};
-    json_printf(
-        &block,
-        "{'type':'job_result','tool_use_id':%s,'name':%s,'is_error':%b,'status':%S,'ran':%"
-        "D,'content':%R}",
-        c->id,
-        c->tool_name,
-        c->is_error,
-        buf_span(&c->status),
-        ran_seconds(c),
-        buf_span(&c->result)
-    );
+    json_list block = {0};
+    json_buf content = {0};
+    put_result_block(c, &block);
     json_printf(&content, "[%R]", buf_span(&block));
     inbox_add(c->calls->inbox, FROM_JOB, WHEN_TURN, buf_span(&content));
     buf_free(&block);
     buf_free(&content);
+}
+
+/* tool_start, once, when the call is under way: with its process's pid, the file its output goes
+   to once it spills or the call becomes a job, and whether its stdin stays open. */
+static void announce(call *c)
+{
+    if (c->announced)
+        return;
+    c->announced = true;
+    json_buf extra = {0};
+    if (c->proc)
+        json_printf(
+            &extra,
+            ",'pid':%d,'out':%s,'stdin_open':%b",
+            (int)c->proc->pid,
+            c->output.file_path,
+            c->proc->keep_stdin_open
+        );
+    output_emit(
+        c->calls->output,
+        "{'type':'tool_start','run':%d,'turn':%d,'call':%s,'name':%s,'input':%R%r}",
+        c->run,
+        c->turn,
+        c->id,
+        c->tool_name,
+        buf_span(&c->input),
+        buf_cstr(&extra)
+    );
+    buf_free(&extra);
+}
+
+/* The call's result is final: the block a coming user message carries, announced now. */
+static void emit_result(call *c)
+{
+    json_list block = {0};
+    announce(c);
+    put_result_block(c, &block);
+    output_emit(c->calls->output, "{'type':'block','run':%d,'block':%R}", c->run, buf_span(&block));
+    buf_free(&block);
 }
 
 static void finish_wait(call *waiter, call *job);
@@ -151,14 +204,9 @@ static void end_call(call *c, const char *end_status)
 {
     c->state = CALL_DONE;
     c->ended_at = get_monotonic_seconds();
-    output_emit(
-        c->calls->output,
-        "{'type':'tool_end','run':%d,'call':%s,'is_error':%b,'status':%s}",
-        c->run,
-        c->id,
-        c->is_error,
-        end_status
-    );
+    if (!c->status.n)
+        buf_set(&c->status, S(end_status));
+    emit_result(c);
     if (c->delivers_late)
         queue_job_result(c);
     wake_waiters(c);
@@ -180,14 +228,10 @@ static void cancel_call(call *c, const char *end_status, const char *text)
         proc_term(c->proc);
     }
     set_result_text(c, S(text), true);
+    buf_set(&c->status, S(end_status));
     c->state = CALL_CANCELLED;
-    output_emit(
-        c->calls->output,
-        "{'type':'tool_end','run':%d,'call':%s,'is_error':true,'status':%s}",
-        c->run,
-        c->id,
-        end_status
-    );
+    c->ended_at = get_monotonic_seconds();
+    emit_result(c);
     free_if_unreferenced(c);
 }
 
@@ -205,26 +249,44 @@ static void write_to_file(capture *k, span bytes)
         stop_capture_to_file(k);
 }
 
+/* <session>.d/calls/<call>.out, with every character of the call id but letters, digits and '-'
+   made '_'. */
 static char *output_path(const call *c)
 {
     buf path = {0};
-    buf_printf(&path, "%s.d", c->calls->config->session_path);
-    mkdir(path.p, 0755);
-    buf_puts(&path, "/calls");
-    mkdir(buf_cstr(&path), 0755);
-    buf_putc(&path, '/');
+    buf_printf(&path, "%s.d/calls/", c->calls->config->session_path);
     for (const char *p = c->id; *p; p++)
         buf_putc(&path, isalnum((unsigned char)*p) || *p == '-' ? *p : '_');
     buf_puts(&path, ".out");
     return path.p;
 }
 
+/* True once the output is being written to its file (or writing it failed). */
+static bool is_filed(const capture *k)
+{
+    return k->file_fd >= 0 || k->file_error;
+}
+
+static void make_parent_dirs(const char *path)
+{
+    buf dir = {0};
+    for (const char *p = strchr(path + 1, '/'); p; p = strchr(p + 1, '/'))
+    {
+        dir.n = 0;
+        buf_put(&dir, path, (size_t)(p - path));
+        mkdir(buf_cstr(&dir), 0755);
+    }
+    buf_free(&dir);
+}
+
 static void capture_to_file(call *c)
 {
     capture *k = &c->output;
-    if (k->file_path)
+    if (is_filed(k))
         return;
-    k->file_path = output_path(c);
+    if (!k->file_path)
+        k->file_path = output_path(c);
+    make_parent_dirs(k->file_path);
     k->file_fd = open(k->file_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (k->file_fd < 0)
         stop_capture_to_file(k);
@@ -249,30 +311,6 @@ static size_t output_limit_bytes(const call *c, json input)
         return SIZE_MAX;
     double n = json_get_num(json_get(input, "output_limit"), DEFAULT_OUTPUT_LIMIT_BYTES);
     return n < 0 ? 0 : n > MAX_OUTPUT_LIMIT_BYTES ? (size_t)MAX_OUTPUT_LIMIT_BYTES : (size_t)n;
-}
-
-static void add_pending_block(call *c, json_list *blocks)
-{
-    json_printf(
-        blocks,
-        "%r{'type':'tool_pending','tool_use_id':%s,'name':%s,'state':%s",
-        blocks->n ? "," : "",
-        c->id,
-        c->tool_name,
-        state_names[c->state]
-    );
-    if (c->proc)
-    {
-        capture_to_file(c);
-        json_printf(
-            blocks,
-            ",'pid':%d,'out':%s,'stdin_open':%b",
-            (int)c->proc->pid,
-            c->output.file_path,
-            c->proc->keep_stdin_open
-        );
-    }
-    buf_putc(blocks, '}');
 }
 
 static span text_or_empty(const buf *b)
@@ -339,7 +377,7 @@ static void put_header(buf *header, const call *c, bool shown)
             k->total_bytes,
             c->media_type ? c->media_type : "binary output"
         );
-        if (k->file_path)
+        if (is_filed(k))
             put_file(header, k);
     }
     else if (k->total_bytes > k->kept.n)
@@ -588,9 +626,11 @@ static void spawn_tool(call *c, const tool_def *def)
         c->proc = proc_spawn(c->calls->procs, &r);
         c->launched_at = get_monotonic_seconds();
         c->calls->running_execs++;
-        if (c->delivers_late)
+        c->output.file_path = output_path(c);
+        if (!c->wait)
             capture_to_file(c);
         c->state = CALL_RUNNING;
+        announce(c);
     }
     strv_free(&l.argv);
     buf_free(&l.stdin_text);
@@ -733,6 +773,7 @@ static void run_job(call *c)
         c->launched_at = get_monotonic_seconds();
         c->deadline = c->launched_at + (wait_seconds > 0 ? wait_seconds : 0);
         c->state = CALL_RUNNING;
+        announce(c);
         if (wait_seconds <= 0)
         {
             buf text = {0};
@@ -856,15 +897,6 @@ static void start_call(calls *cs, json tool_use, int run, int turn)
         c->deadline = get_monotonic_seconds() + wait_seconds;
     VEC_PUSH(cs->live, cs->nlive, cs->caplive, c);
     VEC_PUSH(cs->turn, cs->nturn, cs->capturn, c);
-    output_emit(
-        cs->output,
-        "{'type':'tool_start','run':%d,'turn':%d,'call':%s,'name':%s,'input':%R}",
-        run,
-        turn,
-        c->id,
-        c->tool_name,
-        buf_span(&c->input)
-    );
     if (json_is(buf_span(&c->input), '{'))
         dispatch(c);
     else
@@ -917,13 +949,17 @@ void calls_abort_turn(calls *cs)
 
 void calls_take_turn_results(calls *cs, json_list *blocks)
 {
+    /* A program that exited in the round its wait ran out has its result already. */
+    for (size_t i = 0; i < cs->nturn; i++)
+        if (cs->turn[i]->state == CALL_RUNNING && cs->turn[i]->exited)
+            collect_exec_result(cs->turn[i]);
     for (size_t i = 0; i < cs->nturn; i++)
     {
         call *c = cs->turn[i];
         if (settled(c))
-            blocks_add_tool_result(blocks, c->id, c->is_error, buf_span(&c->result));
-        else
-            c->delivers_late = true, add_pending_block(c, blocks);
+            put_result_block(c, blocks);
+        else if ((c->delivers_late = true) && c->proc)
+            capture_to_file(c);
     }
     for (size_t i = 0; i < cs->nturn; i++)
     {
