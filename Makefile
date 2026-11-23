@@ -12,9 +12,9 @@ BIN        = $(BUILD_ROOT)/bin
 SYSTEM     = $(BUILD_ROOT)/system
 
 SHARED     = $(OBJ)/shared/json.o $(OBJ)/shared/bytes.o
-KERNEL     = $(patsubst %,$(OBJ)/akern/%.o,main loop input turns calls tools inbox proc session output message) $(SHARED)
+KERNEL     = $(patsubst %,$(OBJ)/akern/%.o,main bus loop process input tools model inbox) $(SHARED)
 FILE_TOOLS = $(BIN)/akern-edit
-FRONT_ENDS = $(BIN)/akern-acp
+FRONT_ENDS = $(BIN)/akern-acp $(BIN)/akern-agent $(BIN)/akern-shell
 PROVIDERS  = $(patsubst %,$(SYSTEM)/providers/%,mock anthropic claude-code openai)
 PROTOCOL   = $(OBJ)/providers/provider.o $(SHARED)
 ANTHROPIC  = $(OBJ)/providers/anthropic_messages.o $(OBJ)/providers/media.o $(PROTOCOL)
@@ -25,6 +25,9 @@ DATA       = $(SKILLS) $(SYSTEM)/render.jq $(SYSTEM)/system-prompt $(SYSTEM)/bas
 PROGRAMS   = $(BIN)/akern $(FILE_TOOLS) $(FRONT_ENDS)
 VENV       = build/venv
 PYTEST     = $(VENV)/bin/pytest
+TEST_DEPS  = $(VENV)/.pytest-xdist
+# Test processes at once; `make test TEST_JOBS=0` runs the tests one at a time.
+TEST_JOBS  = auto
 
 LINK = @mkdir -p $(@D) && $(CC) $(CFLAGS) $(LDFLAGS) -o $@
 COPY = @mkdir -p $(@D) && cp -p $< $@
@@ -41,6 +44,12 @@ $(FILE_TOOLS): $(BIN)/%: $(OBJ)/tools/%.o
 
 $(BIN)/akern-acp: $(OBJ)/tools/akern-acp.o $(SHARED)
 	$(LINK) $^ -lm
+
+$(BIN)/akern-agent: $(OBJ)/tools/akern-agent.o $(SHARED)
+	$(LINK) $^
+
+$(BIN)/akern-shell: $(OBJ)/tools/akern-shell.o $(SHARED)
+	$(LINK) $^
 
 $(SYSTEM)/providers/mock: $(OBJ)/providers/mock.o $(PROTOCOL)
 	$(LINK) $^
@@ -77,11 +86,11 @@ $(SYSTEM)/system-prompt: tools/system-prompt
 $(SYSTEM)/base-prompt.md: tools/base-prompt.md
 	$(COPY)
 
-# The shell tool runs bash; where there is none, sh, and its description says so.
+# The shell tool runs bash; where there is none, akern-shell runs sh, and the description says so.
 $(SYSTEM)/tools.json: tools/tools.json
 	@mkdir -p $(@D)
 	@if command -v bash >/dev/null 2>&1; then cp -p $< $@; \
-	else sed -e 's/"program": "bash"/"program": "sh"/' -e 's/Run a command with bash /Run a command with sh /' $< > $@; \
+	else sed -e 's/Run a command with bash /Run a command with sh /' $< > $@; \
 	echo "no bash on PATH: $@ runs sh"; fi
 
 $(SYSTEM)/README.md: home/README.md
@@ -94,11 +103,13 @@ asan:
 	$(MAKE) BUILD_ROOT=$(ASAN_ROOT) CFLAGS="-std=c99 -O1 -g -Wall -Wextra -Wpedantic $(SANITIZE)" LDFLAGS="$(SANITIZE)" test
 	@! ls $(ASAN_ROOT)/sanitizer.* 2>/dev/null
 
-$(PYTEST):
-	python3 -m venv $(VENV) && $(VENV)/bin/pip install -q --disable-pip-version-check pytest
+$(TEST_DEPS):
+	python3 -m venv $(VENV) && $(VENV)/bin/pip install -q --disable-pip-version-check pytest pytest-xdist && touch $@
 
-test: all $(PYTEST)
-	AKERN_BUILD=$(abspath $(BUILD_ROOT)) PYTHONDONTWRITEBYTECODE=1 $(PYTEST) -q -p no:cacheprovider tests
+# Bytecode, the tests' rewritten asserts included, is cached in the venv, not beside the sources.
+test: all $(TEST_DEPS)
+	AKERN_BUILD=$(abspath $(BUILD_ROOT)) PYTHONDONTWRITEBYTECODE= PYTHONPYCACHEPREFIX=$(abspath $(VENV))/pycache \
+	    $(PYTEST) -q -p no:cacheprovider -n $(TEST_JOBS) --dist worksteal tests
 
 install: all
 	$(NOT_BUILD)

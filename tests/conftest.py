@@ -1,8 +1,10 @@
 """Fixtures for running akern against the mock provider, and helpers for reading what it did."""
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -10,10 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from invariants import event_violations, session_violations
+from invariants import context_order, event_violations, log_violations, session_violations
 
 REPO = Path(__file__).resolve().parent.parent
 BUILD = Path(os.environ.get("AKERN_BUILD", REPO / "build"))
+SCRIPTS = BUILD / "test-scripts"
 
 # Seconds to wait for anything before calling it hung. No test measures speed: a loaded
 # machine is slow, not wrong, and these budgets exist only so that a hang fails.
@@ -78,6 +81,25 @@ def signal_when(*steps):
     return send
 
 
+def executable(path, text):
+    """Makes `path` a program that is `text`: a hard link to a kept copy of the same text, as macOS
+    vets each new executable file on its first run (about 0.4 s) and a kept copy is vetted once.
+    The copy is read-only, so writing through the link fails instead of changing it for others."""
+    kept = SCRIPTS / hashlib.sha256(text.encode()).hexdigest()[:20]
+    if not kept.exists():
+        SCRIPTS.mkdir(exist_ok=True)
+        fresh = kept.with_suffix(f".{os.getpid()}")
+        fresh.write_text(text)
+        fresh.chmod(0o555)
+        os.replace(fresh, kept)
+    path.unlink(missing_ok=True)
+    try:
+        os.link(kept, path)
+    except OSError:
+        shutil.copy(kept, path)
+    return path
+
+
 def wait_for(condition, timeout=PATIENCE):
     """Poll until `condition()` returns something truthy, and return it."""
     deadline = time.monotonic() + timeout
@@ -122,7 +144,8 @@ class Run:
 
     @property
     def messages(self):
-        return [e["message"] for e in self.entries_of("message")]
+        """The messages in context order (a reply sits at its turn_start)."""
+        return [e["message"] for e in context_order(self.entries)]
 
     @property
     def calls(self):
@@ -169,6 +192,7 @@ class Run:
         found = [f"{s.name}: {v}" for s in sessions for v in session_violations(_read_jsonl(s, skip_invalid=True))]
         if not self.printing:
             found += [f"{self.events_path.name}: {v}" for v in event_violations(self.events)]
+            found += [f"{self.session.name}: {v}" for v in log_violations(self.entries, self.events)]
         return found
 
 
@@ -179,6 +203,7 @@ class Kernel:
         self.dir = dir
         (dir / "agents").mkdir()
         self.env = env
+        self.own = {"TMPDIR": str(dir), "XDG_STATE_HOME": str(dir / "state")}  # akern-acp keeps sessions there
         self.runs = 0
 
     def __call__(self, prompt=None, *args, later=(), env=None, during=None, timeout=PATIENCE, code=0,
@@ -197,7 +222,7 @@ class Kernel:
         run = Run(session or name, printing="-p" in args, name=name)
         argv = ["akern", *(["-m", model] if model else []), "-s", str(run.session), *args]
         with open(run.events_path, "w") as out, open(run.stderr_path, "w") as err:
-            proc = subprocess.Popen(argv, cwd=self.dir, env={**self.env, "TMPDIR": str(self.dir), **(env or {})},
+            proc = subprocess.Popen(argv, cwd=self.dir, env={**self.env, **self.own, **(env or {})},
                                     stdin=subprocess.PIPE, stdout=out, stderr=err, text=True)
         run.pid = proc.pid
         threads = [_start(_feed, proc.stdin, run, [] if prompt is None else [(0, prompt)], later)]
@@ -249,11 +274,9 @@ class Home:
 
     def mock(self, script):
         """Runs `script`, then the built mock on the request, which is appended to requests.jsonl first."""
-        path = self.dir / "providers" / "mock"
-        path.unlink(missing_ok=True)
-        path.write_text(f'#!/bin/sh\n{script}\nrequest=$(cat)\nprintf "%s\\n" "$request" >> "{self.requests_path}"\n'
-                        f'printf "%s" "$request" | exec "{BUILD / "system" / "providers" / "mock"}"\n')
-        path.chmod(0o755)
+        executable(self.dir / "providers" / "mock",
+                   f'#!/bin/sh\n{script}\nIFS= read -r request\nprintf "%s\\n" "$request" >> "${{0%/*}}/../requests.jsonl"\n'
+                   f'printf "%s" "$request" | exec "{BUILD / "system" / "providers" / "mock"}"\n')
 
     @property
     def requests(self):
@@ -329,23 +352,21 @@ def _parse_or_none(line):
 
 
 _HEADER = re.compile(r"\[([^\n]*)\]")
-_ENDING = re.compile(r"(?:(killed)(?:: output over \d+ bytes)?, )?(exit|signal) (\d+)")
+_ENDING = re.compile(r"(exit|signal) (\d+)")
 _CUT = re.compile(r"cut at (\d+) of (\d+) bytes, (?:all of it in (.+)|saving all of it to (.+) failed: (.+))")
-_HIDDEN = re.compile(r"(\d+) bytes of (.+) not shown(?:, (?:all of it in (.+)|saving all of it to (.+) failed: (.+)))?")
+_HIDDEN = re.compile(r"(\d+) bytes of (.+) not shown, (?:all of it in (.+)|saving all of it to (.+) failed: (.+))")
 
 
 def parse_shell(text):
-    """A shell result's text as a dict: output, exit (or signal), and when they apply killed,
+    """A shell result's text as a dict: output, exit (or signal), and when they apply
     total and file (cut or not shown), file_error, and hidden (what was not shown)."""
     header, _, output = text.partition("\n")
     match = _HEADER.fullmatch(header)
     assert match, f"no header line: {text[:200]!r}"
     result = {"output": output}
     ending, *parts = match.group(1).split("; ")
-    killed, kind, n = _ENDING.fullmatch(ending).groups()
+    kind, n = _ENDING.fullmatch(ending).groups()
     result[kind] = int(n)
-    if killed:
-        result["killed"] = True
     for part in parts:
         if cut := _CUT.fullmatch(part):
             _, total, file, failed_file, error = cut.groups()

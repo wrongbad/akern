@@ -14,7 +14,7 @@ first, then the verb: `session_read_message`, `turns_put_status`.
 | Verb | Meaning | Examples |
 |---|---|---|
 | `is_`, `has_`, `was_` | a yes/no question; no side effects | `turns_is_quiescent`, `session_has_failed`, `provider_was_aborted` |
-| `get_` | returns something that already exists; cheap, no I/O | `session_get_head_id`, `json_get_num` |
+| `get_` | returns something that already exists; cheap, no I/O | `turns_get_run`, `json_get_num` |
 | `read_` | does I/O to produce its result | `session_read_context`, `provider_read_request` |
 | `put_` | writes into a buffer the caller passes in | `json_put_string`, `turns_put_status` |
 | `emit_` | writes a line to stdout | `output_emit`, `provider_emit_result` |

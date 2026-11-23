@@ -652,18 +652,33 @@ static void put_block(json_buf *out, block *b)
     }
 }
 
-void anthropic_emit_result(bool aborted)
+void anthropic_begin_stream(void)
 {
-    json_buf content = {0};
-    buf_putc(&content, '[');
+    start_message(NOSPAN);
+}
+
+const char *anthropic_stop(void)
+{
+    return stop_name(false);
+}
+
+void anthropic_put_content(json_buf *content, bool aborted)
+{
+    buf_putc(content, '[');
     for (size_t i = 0; i < st.nblocks; i++)
     {
         if (!keep_block(&st.blocks[i], aborted))
             continue;
-        json_put_comma_unless_first(&content);
-        put_block(&content, &st.blocks[i]);
+        json_put_comma_unless_first(content);
+        put_block(content, &st.blocks[i]);
     }
-    buf_putc(&content, ']');
+    buf_putc(content, ']');
+}
+
+void anthropic_emit_result(bool aborted)
+{
+    json_buf content = {0};
+    anthropic_put_content(&content, aborted);
     provider_emit_result(
         stop_name(aborted),
         buf_span(&content),
@@ -674,4 +689,5 @@ void anthropic_emit_result(bool aborted)
             st.usage_tokens[USAGE_CACHE_READ],
             st.usage_tokens[USAGE_CACHE_WRITE]}
     );
+    buf_free(&content);
 }

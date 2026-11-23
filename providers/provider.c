@@ -1,13 +1,14 @@
 #include "provider.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static volatile sig_atomic_t terminated;
-static bool emitted;
+static bool emitted, stays, trapped;
 static json_buf request;
 
 static void on_sigterm(int sig)
@@ -16,32 +17,68 @@ static void on_sigterm(int sig)
     terminated = 1;
 }
 
+/* No SA_RESTART: a SIGTERM while waiting for the next request ends the wait. */
 static void trap_sigterm(void)
 {
+    if (trapped)
+        return;
     struct sigaction sa = {0};
     sa.sa_handler = on_sigterm;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL);
+    trapped = true;
 }
 
-static void read_all(FILE *f, buf *bytes)
+/* One line from stdin, without its newline; false at EOF or once SIGTERM has arrived. */
+static bool read_line(buf *line)
 {
-    char chunk[65536];
-    size_t n;
-    while ((n = fread(chunk, 1, sizeof chunk, f)) > 0)
-        buf_put(bytes, chunk, n);
+    line->n = 0;
+    for (int c;;)
+    {
+        if (terminated)
+            return false;
+        errno = 0;
+        if ((c = getc_unlocked(stdin)) == EOF)
+        {
+            if (errno == EINTR)
+            {
+                clearerr(stdin);
+                continue;
+            }
+            return line->n > 0;
+        }
+        if (c == '\n')
+            return true;
+        buf_putc(line, (char)c);
+    }
 }
 
-json provider_read_request(void)
+bool provider_next_request(json *out)
 {
     trap_sigterm();
-    read_all(stdin, &request);
+    if (!read_line(&request))
+        return false;
+    emitted = false;
     json r = buf_span(&request);
     bool well_formed = json_is_valid(r) && json_is(json_get(r, "model"), '"') &&
                        json_is(json_get(r, "messages"), '[');
     if (!well_formed)
         provider_emit_error("invalid_request", "expected {\"model\",\"messages\",...} on stdin", 0);
-    return json_trim(r);
+    *out = json_trim(r);
+    return true;
+}
+
+json provider_read_request(void)
+{
+    json r;
+    if (!provider_next_request(&r))
+        provider_emit_error("invalid_request", "expected {\"model\",\"messages\",...} on stdin", 0);
+    return r;
+}
+
+void provider_stay(void)
+{
+    stays = true;
 }
 
 bool provider_was_aborted(void)
@@ -89,15 +126,17 @@ void provider_emit_result(const char *stop, json content, provider_usage usage)
 {
     provider_emit(
         "{'type':'result','stop':%s,'message':{'role':'assistant','content':%R},"
-        "'usage':{'input':%D,'output':%D,'cache_read':%D,'cache_write':%D}}",
+        "'usage':{'input':%D,'output':%D,'cache_read':%D,'cache_write':%D}%r}",
         stop,
         content,
         usage.input,
         usage.output,
         usage.cache_read,
-        usage.cache_write
+        usage.cache_write,
+        stays ? ",\"stay\":true" : ""
     );
-    exit(0);
+    if (!stays)
+        exit(0);
 }
 
 void provider_emit_error(const char *kind, const char *message, long status)

@@ -2,6 +2,10 @@
 
 An agent kernel: a truly minimal agent harness in C99. 
 
+**Status: pre-alpha.** Every protocol, file format and command may change in a
+breaking way at any commit, with no migration path, no compatibility shims and
+no deprecation period. Sessions written by one commit may not open in the next.
+
 ## Quick start
 
 ```sh
@@ -18,7 +22,7 @@ Why C99? It's a sort of fun aesthetic / nostalgic choice. For a tiny project lik
 
 The goal is feature parity with the [pi](https://github.com/earendil-works/pi) coding harness, reached by composition of trivial user-replacable scripts and binaries.
 
-Editors and hosts that speak the Agent Client Protocol (Zed, Omnigent) run it through `akern-acp`.
+Editors and hosts that speak the Agent Client Protocol (Zed, Omnigent) run it through `akern-acp`, and it runs other ACP agents as sub-agents through `akern-agent`.
 
 In some ways we already exceed base pi capabilities. Concurrent tool calls and recursive sub-agent calls come for free with the subprocess design.
 
@@ -40,8 +44,8 @@ make test       # run tests
 | `make install` | [tools.md §3](docs/tools.md#install) |
 | `make clean` | removes `build/` |
 
-Not yet built: `akern-tui`, the session commands (`fork`, `tree`,
-`compact`, `sessions`).
+Not yet built: `akern-tui`, the session commands (`fork`, `compact`,
+`sessions`).
 
 ## Installing
 
@@ -61,9 +65,11 @@ See [tools.md §3](docs/tools.md#install) for details.
 |---|---|
 | [docs/design.md](docs/design.md) | goals, principles, costs and security posture |
 | [docs/style.md](docs/style.md) | how the C is written: verbs in names, layout, the `clang-format` config |
-| [docs/akern.md](docs/akern.md) | the kernel process: environment, arguments, stdin commands, stdout events, session files |
-| [docs/turn.md](docs/turn.md) | one typed prompt with two tool calls, step by step: the processes and events |
+| [docs/akern.md](docs/akern.md) | the kernel process: environment, arguments, stdin commands, stdout lines, which the session file holds as said |
+| [docs/turn.md](docs/turn.md) | one typed prompt with two tool calls, step by step: the processes and lines |
 | [docs/providers.md](docs/providers.md) | `providers/`: the request, the event stream, errors, the message schema; anthropic, claude-code, openai, mock |
-| [docs/tools.md](docs/tools.md) | `tools/` and `skills/`: `shell`, `job`, `edit`, programs on `PATH`, skills, the `akern-cli` and `akern-acp` front ends |
+| [docs/tools.md](docs/tools.md) | `tools/` and `skills/`: `shell`, `job`, `edit`, programs on `PATH` (`akern-agent` included), skills, the `akern-cli` and `akern-acp` front ends |
+| [docs/sandbox.md](docs/sandbox.md) | design, not built: the agent in a container, API keys in a proxy outside it |
+| [docs/multi-client.md](docs/multi-client.md) | parked: several clients driving or watching one session, and what gets in the way |
 | [docs/pi-parity.md](docs/pi-parity.md) | every pi feature mapped to the mechanism that provides it here |
 | [docs/roadmap.md](docs/roadmap.md) | remaining work and open questions |

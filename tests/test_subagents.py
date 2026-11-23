@@ -42,4 +42,5 @@ def test_children_get_only_the_model_and_the_recursion_limit_from_the_kernel(ker
     run = kernel(shell("env | grep ^AKERN_ | sort"), env=home.env)
     inherited = f"AKERN_HOME={home.dir}\nAKERN_MODEL=mock/echo\nAKERN_RE_LIMIT=3"
     assert {n["message"] for n in run.events_of("notice")} == set(inherited.splitlines())
-    assert run.shell_result["output"] == inherited + "\n"
+    out = f"AKERN_OUT={run.session}.d/calls/{run.calls[0]}.out"
+    assert run.shell_result["output"] == "\n".join(sorted([*inherited.splitlines(), out])) + "\n"

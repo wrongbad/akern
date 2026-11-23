@@ -1,8 +1,19 @@
 """Invariants every kernel run must keep, in its session log and its event stream."""
 
 
-def session_violations(entries):
+def context_order(entries):
+    """The message entries in context order: each at the first line that carries its id (a
+    reply's turn_start, when one was written before it), as the kernel reads the file."""
+    first = {}
+    for i, e in enumerate(entries):
+        if e.get("type") in ("message", "turn_start") and "id" in e:
+            first.setdefault(e["id"], i)
     messages = [e for e in entries if e.get("type") == "message"]
+    return sorted(messages, key=lambda e: first.get(e.get("id"), 0))
+
+
+def session_violations(entries):
+    messages = context_order(entries)
     found = []
     uses, answers = [], []
     for i, entry in enumerate(messages):
@@ -28,6 +39,13 @@ def session_violations(entries):
     return found
 
 
+def log_violations(entries, events):
+    """The file ends with the stream: every line the kernel said, as said, in order."""
+    if entries[len(entries) - len(events):] != events:
+        return ["the session file does not end with the event stream"]
+    return []
+
+
 def event_violations(events):
     found = []
     started, announced = [], []
@@ -45,10 +63,9 @@ def event_violations(events):
                 found.append(f"message with results no block event announced: {unannounced}")
     if unfinished := [c for c in started if c not in announced]:
         found.append(f"tool_start without a block: {unfinished}")
-    streams = [e["type"] for e in events
-               if e["type"] in ("turn_start", "run_end", "replace") or e["type"] == "message" and e.get("source") == "assistant"]
+    streams = [e["type"] for e in events if e["type"] in ("turn_start", "turn_end", "replace")]
     if any(a == b == "turn_start" for a, b in zip(streams, streams[1:])):
-        found.append("two provider streams open at once (turn_start twice without an assistant message, replace or run_end between)")
+        found.append("two provider streams open at once (turn_start twice without a turn_end or replace between)")
     if disagreeing := [e["run"] for e in events
                        if e["type"] == "run_end" and (e["reason"] == "error") != (e["error"] is not None)]:
         found.append(f"run_end with an error but no error reason, or the reverse, in runs {disagreeing}")

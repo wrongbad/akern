@@ -1,4 +1,11 @@
-#include "main.h"
+/* main: akern's entry point and the only code that reads argv and the environment. Owns
+   the options and environment defaults, among them a new session file in $TMPDIR without -s,
+   the AKERN_HOME and recursion limit children inherit, and building the kernel: every module's
+   state in one root, each module wired to the siblings it uses, and the actors in their fixed
+   order; and the first lines: a new session's header, then hello. The config it fills is
+   read-only once the kernel runs; the AKERN_MODEL children inherit is the model's. */
+
+#include "akern.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -11,16 +18,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#include "calls.h"
-#include "inbox.h"
-#include "input.h"
-#include "loop.h"
-#include "output.h"
-#include "proc.h"
-#include "session.h"
-#include "tools.h"
-#include "turns.h"
 
 enum { DEFAULT_RECURSION_LIMIT = 4 };
 
@@ -39,15 +36,14 @@ static const struct option long_options[] = {
 
 struct kernel {
     config config;
-    output output;
-    session session;
-    procs procs;
-    inbox inbox;
-    tools tools;
-    calls calls;
-    turns turns;
-    input input;
+    bus bus;
+    processes processes;
     loop loop;
+    input input;
+    tools tools;
+    model model;
+    inbox inbox;
+    actor actors[5];
 };
 
 static void usage(void)
@@ -195,52 +191,56 @@ static void export_for_children(const config *cfg)
     setenv("AKERN_HOME", cfg->home_dir, 1);
 }
 
+/* The actors in the order they see each line: the loop (exit), input (status), calls (what the
+   reply asks for), the model (whose turn it is), then the inbox, which decides what happens next.
+   Each knows the others only by the lines they put on the bus. */
 static void wire(struct kernel *k)
 {
     const config *cfg = &k->config;
-    output *out = &k->output;
-    k->session = (session){.config = cfg};
-    k->procs = (procs){.config = cfg};
-    k->inbox = (inbox){.output = out};
-    k->calls = (calls){
-        .tools = &k->tools,
-        .config = cfg,
-        .output = out,
-        .procs = &k->procs,
-        .inbox = &k->inbox
-    };
-    k->turns = (turns){
-        .config = cfg,
-        .output = out,
-        .calls = &k->calls,
-        .inbox = &k->inbox,
-        .procs = &k->procs,
-        .session = &k->session
-    };
-    k->input = (input){.config = cfg, .output = out, .inbox = &k->inbox, .turns = &k->turns};
-    k->loop = (loop){
-        .config = cfg,
-        .output = out,
-        .input = &k->input,
-        .turns = &k->turns,
-        .calls = &k->calls,
-        .procs = &k->procs,
-        .session = &k->session
-    };
+    bus *b = &k->bus;
+    processes *ps = &k->processes;
+    k->actors[0] = (actor){&k->loop, loop_on_line, NULL};
+    k->actors[1] = (actor){&k->input, input_on_line, NULL};
+    k->actors[2] = (actor){&k->tools, tools_on_line, tools_put_status};
+    k->actors[3] = (actor){&k->model, model_on_line, model_put_status};
+    k->actors[4] = (actor){&k->inbox, inbox_on_line, inbox_put_status};
+    k->bus = (bus){.actors = k->actors, .nactors = LEN(k->actors), .config = cfg};
+    k->processes = (processes){.config = cfg};
+    k->loop = (loop){.bus = b, .input = &k->input, .processes = ps};
+    k->input = (input){.bus = b, .actors = k->actors, .nactors = LEN(k->actors)};
+    k->tools = (tools){.config = cfg, .bus = b, .processes = ps};
+    k->model = (model){.config = cfg, .tools = &k->tools, .bus = b, .processes = ps};
+    k->inbox = (inbox){.config = cfg, .bus = b, .settled = true};
 }
 
-static void queue_argv_prompt(inbox *in, int nwords, char **words)
+/* A new session's first line. */
+static void put_header(struct kernel *k)
+{
+    char id[NEW_ID_CHARS + 1], cwd[4096];
+    bus_new_id(&k->bus, id);
+    bus_printf(
+        &k->bus,
+        "{'type':'session','v':1,'id':%s,'cwd':%s,'created':%D}",
+        id,
+        getcwd(cwd, sizeof cwd) ? cwd : "",
+        get_unix_seconds()
+    );
+}
+
+/* The positional prompt, a send queued idle before stdin is read. */
+static void queue_argv_prompt(bus *b, int nwords, char **words)
 {
     if (!nwords)
         return;
     buf text = {0};
-    json_buf content = {0};
     for (int i = 0; i < nwords; i++)
         buf_printf(&text, "%s%s", i ? " " : "", words[i]);
-    json_put_string(&content, buf_span(&text));
-    inbox_add(in, FROM_PROMPT, WHEN_IDLE, buf_span(&content));
+    bus_tellf(
+        b,
+        "{'type':'command','command':{'type':'send','content':%S,'when':'idle'}}",
+        buf_span(&text)
+    );
     buf_free(&text);
-    buf_free(&content);
 }
 
 int main(int argc, char **argv)
@@ -250,24 +250,25 @@ int main(int argc, char **argv)
     keep_std_fds_open();
     export_for_children(&k.config);
     wire(&k);
-    tools_open(&k.tools, k.config.home_dir);
-    turns_open(&k.turns);
+    tools_open(&k.tools);
+    model_open(&k.model);
     loop_open(&k.loop);
-    output_open(&k.output, k.config.print_answers);
-    session_open(&k.session);
-    turns_apply_startup_settings(&k.turns);
-    output_emit(
-        &k.output,
-        "{'type':'hello','protocol':2,'session':%s,'head':%s,'model':%s}",
+    bus_open(&k.bus);
+    bool fresh = bus_open_session(&k.bus);
+    bus_replay(&k.bus, model_replay, &k.model);
+    if (fresh)
+        put_header(&k);
+    bus_printf(
+        &k.bus,
+        "{'type':'hello','protocol':3,'session':%s,'model':%s,'params':{%r}}",
         k.config.session_path,
-        session_get_head_id(&k.session),
-        k.turns.provider_model
+        k.config.provider_model,
+        buf_cstr(&k.config.param_members)
     );
-    queue_argv_prompt(&k.inbox, argc - first, argv + first);
+    queue_argv_prompt(&k.bus, argc - first, argv + first);
 
     int exit_code = loop_run(&k.loop);
-    turns_append_leftover_results(&k.turns);
-    output_flush(&k.output);
-    session_close(&k.session);
+    bus_tellf(&k.bus, "{'type':'close'}");
+    bus_close(&k.bus);
     return exit_code;
 }

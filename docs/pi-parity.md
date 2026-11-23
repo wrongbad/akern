@@ -13,7 +13,7 @@ Feature list taken from pi's documentation as of November 2026.
 | Pi feature | Where | Mechanism |
 |---|---|---|
 | Agent loop with streaming | Kernel | `akern` |
-| `bash` | Kernel | the built-in `shell` tool: `bash -c COMMAND`, or `sh` where there is no bash |
+| `bash` | Kernel | the built-in `shell` tool: `akern-shell`, which runs `bash -c COMMAND`, or `sh` where there is no bash |
 | `read` | — | `cat`, `head`, `tail`, `sed -n` through `shell`; an image or PDF on stdout comes back as an image or document block |
 | `write` | — | `cat > path` (or `>>`) through `shell`, the text on stdin, so nothing needs quoting |
 | `edit` | Kernel | the built-in [`edit`](tools.md#edit) tool, run as `akern-edit`: exact-match replace, once or `all`; the text passes as arguments, byte for byte, so it needs no quoting |
@@ -39,7 +39,7 @@ mechanisms, because they are what tests whether the architecture holds.
 | Job results that wake the agent | Kernel | every finished job's result is queued `turn` and wakes it; only `abort` defers results already queued |
 | Model-visible job control | Kernel | a pending call's answer names its pid and output files; `tail`, `kill -TERM -- -PID` through `shell`; waiting is ending the turn. People also have `{"type":"status"}` on stdin |
 | Talking to a running program (REPL, sub-agent) | Kernel | `shell` with `eof: false` keeps the program's stdin open; the model sends it more with `job {"id":"<call id>","stdin":…}`, and `eof` ends it. Steering from another terminal is not supported: whoever started the kernel drives it (use tmux) |
-| Model switch without losing background work | Kernel | a `settings` entry through `append` |
+| Model switch without losing background work | — | no: another model is another start on the same session (`-s S -m other`), once its jobs are done |
 
 ## Modes
 
@@ -55,13 +55,13 @@ mechanisms, because they are what tests whether the architecture holds.
 
 | Pi feature | Where | Mechanism |
 |---|---|---|
-| JSONL session files, tree-structured | Kernel | the session log |
+| JSONL session files, tree-structured | Kernel | the session log, which is linear ([akern.md](akern.md#session-file)) |
 | Per-directory storage, auto-save | User | the `akern-cli` front end picks `~/.akern/sessions/<cwd>/<time>-<id>.jsonl` |
 | `--continue`, `--resume`, `--session` | User | `akern-sessions` lists; the `akern-cli` front end passes `-s` |
 | `--no-session` | Kernel | omit `-s` |
-| `/tree` (branch in place) | User | `akern-tree` appends a `branch` entry (deferred to a boundary if a run is active) |
-| `/fork`, `/clone` | User | `akern-fork` copies a chain to a new file |
-| `/compact` | User | `akern-compact` runs the provider directly for a summary, then appends a new root: directly when the session is unowned, else sent as `append` on the kernel's stdin by the frontend |
+| `/tree` (branch in place) | — | no equivalent: a session cannot branch in place. A fork with `head -n` is the substitute ([akern.md](akern.md#forks)) |
+| `/fork`, `/clone` | User | `akern-fork` writes a session's first lines to a new file; `/clone` is `cp` |
+| `/compact` | User | `akern-compact` runs the provider directly for a summary, then appends a `reset`, the summary and the kept copies: directly when the session is unowned, else sent as `append` on the kernel's stdin by the frontend |
 | Auto-compaction | User | the front end: on a `run_end` with `context_overflow`, or when `meta.usage` nears the limit, run `akern-compact` and `send` to continue |
 | Custom compaction | User | replace or wrap `akern-compact` |
 | `/name`, labels | User | `name` and `label` entries |
@@ -74,7 +74,7 @@ mechanisms, because they are what tests whether the architecture holds.
 | Pi feature | Where | Mechanism |
 |---|---|---|
 | `AGENTS.md` / `CLAUDE.md` discovery | User (bundled) | the shipped system-prompt program, `$AKERN_HOME/system/system-prompt`, adds `AGENTS.md`, else `CLAUDE.md`, of each directory from the repository root down to the working directory ([tools.md](tools.md#the-system-prompt-program)) |
-| System prompt replace / append | Kernel + User (bundled) | the kernel runs the system-prompt program once at startup and sends its output; `-S file` replaces it with a file, and a `settings` entry with new text. Append: `$AKERN_HOME/system.md`, which the shipped program puts first. Replace: your own `$AKERN_HOME/system-prompt` |
+| System prompt replace / append | Kernel + User (bundled) | the kernel runs the system-prompt program once at startup and sends its output; `-S file` replaces it with a file. Append: `$AKERN_HOME/system.md`, which the shipped program puts first. Replace: your own `$AKERN_HOME/system-prompt` |
 | Prompt templates (`/name`) | User | the `akern-cli` front end expands `prompts/<name>.md` before sending |
 | Skills (`SKILL.md`) | User (bundled) | the shipped system-prompt program lists the names and descriptions of `$AKERN_HOME/skills` and `$AKERN_HOME/system/skills` in the system prompt; the model reads them with `cat` |
 | `@file` references | User | the frontend turns them into content blocks |
@@ -89,7 +89,7 @@ mechanisms, because they are what tests whether the architecture holds.
 | OpenAI-compatible (covers most others, local models) | User (bundled) | `providers/openai` |
 | Other providers, custom providers | User | one executable each |
 | `--model`, `--thinking` | Kernel | `-m provider/model`, `-P effort=high` |
-| `/model` switch mid-session | Kernel | a `settings` entry through `append`; takes effect at the next request and stays with the session and its branch |
+| `/model` switch mid-session | Front end | a new kernel on the same session with `-m`; `akern-acp` restarts its kernel once it has settled |
 | Default model setting | User (bundled) | `$AKERN_HOME/model`, one `provider/model` line; `akern-cli` exports it as `AKERN_MODEL` when that is unset |
 | Interactive model selector | User (bundled) | `akern-model`: every provider, numbered, with why an unavailable one cannot be used; then the ready one's `--models` ids or a typed id. `akern-cli` runs it when no model is set |
 | Model cycling, scoped models, fuzzy match | User | `akern-cli` or frontend feature over `<provider> --models` |
@@ -112,7 +112,7 @@ mechanisms, because they are what tests whether the architecture holds.
 | Packages (`install`, `remove`, `update`, `list`) | User | `akern-pkg`: programs onto `PATH`, providers and skills into `~/.akern` |
 | Project-local config with trust gate | — | not yet: only `~/.akern` is read ([roadmap.md](roadmap.md#where-settings-live)) |
 | Settings files (global, project) | User | read by the `akern-cli` front end and frontends, exported as environment and flags (`-m`, `-P`) |
-| Hot reload (`/reload`) | Kernel | tools are found on `PATH` per call and the provider per request; the system prompt is built at startup, so a new skill or `AGENTS.md` needs a new kernel on the same session (`-s`), or a `settings` entry with the new text |
+| Hot reload (`/reload`) | Kernel | tools are found on `PATH` per call and the provider per request; the system prompt is built at startup, so a new skill or `AGENTS.md` needs a new kernel on the same session (`-s`) |
 
 ## Things pi leaves to extensions
 
@@ -141,8 +141,8 @@ mechanisms, because they are what tests whether the architecture holds.
 | `message_end` (replace message) | provider wrapper that rewrites the `result` line |
 | `before_provider_headers`, `after_provider_response` | inside, or wrapped around, the provider |
 | `session_start`, `session_shutdown` | the wrapper script that starts the kernel |
-| `session_before_compact` / `_fork` / `_tree` / `_switch` and their after-events | those operations are commands; edit or wrap the command |
-| `model_select`, `thinking_level_select` | `settings` entries through `append`; frontends observe them in the session |
+| `session_before_compact` / `_fork` / `_tree` / `_switch` and their after-events | those operations are commands (there is no tree); edit or wrap the command |
+| `model_select`, `thinking_level_select` | a new kernel with `-m` / `-P`; each start's `hello` in the session records them |
 | `user_bash` | frontend |
 | `project_trust` | the `akern-cli` front end |
 | `resources_discover` | `PATH` for programs, `~/.akern` for providers and the system-prompt program, which finds skills and context files |
@@ -162,4 +162,4 @@ Honest list of where parity needs more than a script:
    Each is an independent executable here, but each still has to be written.
 4. **Orphaned processes after `SIGKILL` on macOS.** Process groups plus
    cascading `SIGTERM` cover normal shutdown. A hard kill of a kernel can leave
-   a sub-agent's tools running ([proc.h](../akern/proc.h)).
+   a sub-agent's tools running ([process.c](../akern/process.c)).

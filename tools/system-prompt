@@ -2,7 +2,8 @@
 export LC_ALL=C
 # Shipped as HOME/system/system-prompt: that HOME, however it is run (./build/system/system-prompt
 # renders build's prompt). A copy elsewhere uses $AKERN_HOME, else ~/.akern.
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit
+case $0 in */*) here=${0%/*} ;; *) here=. ;; esac
+here=$(CDPATH= cd -- "$here" && pwd) || exit
 case $here in
 ?*/system) home=${here%/system} ;;
 *) home=$(CDPATH= cd -- "${AKERN_HOME:-$HOME/.akern}" && pwd) || exit ;;
@@ -45,7 +46,8 @@ fi
 dir=$PWD
 dirs=$dir
 while [ ! -e "$dir/.git" ] && [ "$dir" != / ]; do
-    dir=$(dirname "$dir")
+    dir=${dir%/*}
+    dir=${dir:-/}
     dirs="$dir
 $dirs"
 done

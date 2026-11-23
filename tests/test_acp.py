@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from conftest import PATIENCE, tool
+from conftest import PATIENCE, tool, wait_for
 
 
 class Client:
@@ -99,6 +99,22 @@ def texts(updates, kind="agent_message_chunk"):
     return "".join(u["content"]["text"] for u in updates if u["sessionUpdate"] == kind)
 
 
+def session_lines(tmp_path, session):
+    return [json.loads(line) for line in (tmp_path / "sessions" / f"{session}.jsonl").read_text().splitlines()]
+
+
+def hellos(tmp_path, session):
+    """The hello line of each akern started on the session: its model and params."""
+    return [e for e in session_lines(tmp_path, session) if e["type"] == "hello"]
+
+
+def answered_by(tmp_path, session):
+    """The hello of the akern that wrote the session's last message."""
+    lines = session_lines(tmp_path, session)
+    last = max(i for i, e in enumerate(lines) if e["type"] == "message")
+    return [e for e in lines[:last] if e["type"] == "hello"][-1]
+
+
 def test_initialize_says_what_akern_acp_offers(akern_env, tmp_path):
     client = Client({**akern_env, "AKERN_MODEL": "mock/echo"}, tmp_path)
     result = client.call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
@@ -148,9 +164,11 @@ def test_an_edit_is_shown_as_a_diff_of_its_file(acp, tmp_path):
 def test_a_job_that_outlives_its_prompt_reports_at_the_next_prompt(acp, tmp_path):
     client = acp()
     session = new_session(client, tmp_path)
-    assert prompt(client, session, tool("shell", command="sleep 0.3 && echo bg", wait=0))["stopReason"] == "end_turn"
+    ended = tmp_path / "ended"
+    assert prompt(client, session, tool("shell", command=f"sleep 0.3 && echo bg && touch {ended}", wait=0))["stopReason"] == "end_turn"
     [start] = [u for u in client.take_updates() if u["sessionUpdate"] == "tool_call"]
-    assert client.quiet_for(1.5), "updates arrived while no prompt was open"
+    wait_for(ended.exists)
+    assert client.quiet_for(0.5), "updates arrived while no prompt was open"
     prompt(client, session, "next")
     updates = client.take_updates()
     [end] = [u for u in updates if u["sessionUpdate"] == "tool_call_update" and u["status"] == "completed"]
@@ -217,13 +235,17 @@ def test_loading_a_session_that_does_not_exist_fails(acp, tmp_path):
     assert response["error"]["code"] == -32002
 
 
-def test_set_model_records_the_switch_in_the_session(acp, tmp_path):
+def test_set_model_restarts_akern_on_the_new_model_with_the_same_session(acp, tmp_path):
     client = acp()
     session = new_session(client, tmp_path)
+    prompt(client, session, "one")
     client.call("session/set_model", {"sessionId": session, "modelId": "mock/other"})
-    prompt(client, session, "hi")
-    entries = [json.loads(line) for line in (tmp_path / "sessions" / f"{session}.jsonl").read_text().splitlines()]
-    assert {"type": "settings", "model": "mock/other"}.items() <= [e for e in entries if e["type"] == "settings"][-1].items()
+    prompt(client, session, "two")
+    assert [h["model"] for h in hellos(tmp_path, session)] == ["mock/echo", "mock/other"]
+    entries = session_lines(tmp_path, session)
+    assert [e["meta"]["model"] for e in entries if e["type"] == "message" and e["message"]["role"] == "assistant"] == [
+        "mock/echo", "mock/other"]
+    assert not [e for e in entries if e["type"] == "settings"]
 
 
 def test_a_session_that_cannot_start_fails_with_akerns_reason(akern_env, home, tmp_path):
@@ -254,11 +276,6 @@ def test_a_client_that_goes_away_stops_its_jobs_so_the_session_can_be_loaded_aga
     assert texts(second.take_updates(), "user_message_chunk").startswith("!@shell")
 
 
-def session_settings(tmp_path, session):
-    lines = (tmp_path / "sessions" / f"{session}.jsonl").read_text().splitlines()
-    return [e for e in map(json.loads, lines) if e["type"] == "settings"]
-
-
 def test_a_new_session_offers_its_providers_models_and_a_thinking_effort_choice(acp, tmp_path):
     client = acp()
     result = client.call("session/new", {"cwd": str(tmp_path), "mcpServers": []})
@@ -276,7 +293,7 @@ def test_the_effort_option_sets_the_providers_effort_param(acp, tmp_path):
     result = client.call("session/set_config_option", {"sessionId": session, "configId": "effort", "value": "high"})
     assert result["configOptions"][0]["currentValue"] == "high"
     prompt(client, session, "hi")
-    assert session_settings(tmp_path, session)[-1]["params"] == {"effort": "high"}
+    assert answered_by(tmp_path, session)["params"] == {"effort": "high"}
 
 
 def test_slash_commands_are_answered_by_akern_acp_and_never_reach_the_model(acp, tmp_path):
@@ -293,9 +310,9 @@ def test_slash_commands_are_answered_by_akern_acp_and_never_reach_the_model(acp,
     assert changed["configOptions"][0]["currentValue"] == "max"
     prompt(client, session, "hi")
     assert texts(client.take_updates()) == "echo: hi"
-    settings = session_settings(tmp_path, session)
-    assert (settings[-2].get("model"), settings[-1].get("params")) == ("mock/other", {"effort": "max"})
-    users = [b["text"] for e in map(json.loads, (tmp_path / "sessions" / f"{session}.jsonl").read_text().splitlines())
+    hello = answered_by(tmp_path, session)
+    assert (hello["model"], hello["params"]) == ("mock/other", {"effort": "max"})
+    users = [b["text"] for e in session_lines(tmp_path, session)
              if e["type"] == "message" and e["message"]["role"] == "user" for b in e["message"]["content"]]
     assert users == ["hi"]
 
@@ -473,10 +490,11 @@ def test_v2_cancel_ends_the_run_cancelled(acp2, tmp_path):
 def test_v2_a_job_is_cancelled_by_its_tool_call_id(acp2, tmp_path):
     client = acp2()
     session = client.call("session/new", {"cwd": str(tmp_path)})["sessionId"]
-    say(client, session, tool("shell", command="sleep 30", wait=0))
+    say(client, session, tool("shell", command="echo ready && sleep 30", wait=0))
     updates = client.until(idle(session))
     [call] = calls(updates, session)
     assert call["capabilities"] == {"cancel": {}}
+    client.until(lambda updates: b"ready\n" in b"".join(base64.b64decode(u["data"]) for u in of(updates, session, "terminal_output_chunk")))
     client.call("tool_call/cancel", {"sessionId": session, "toolCallId": call["toolCallId"]})
     updates = client.until(lambda updates: calls(updates, session)[0]["status"] != "in_progress")
     assert calls(updates, session)[0]["status"] == "cancelled"
@@ -570,8 +588,8 @@ def test_v2_commands_and_config_options_change_the_model_and_effort(acp2, tmp_pa
     assert result["configOptions"][0]["currentValue"] == "mock/other"
     say(client, session, "hi")
     client.until(idle(session, 2))
-    settings = session_settings(tmp_path, session)
-    assert (settings[-2].get("params"), settings[-1].get("model")) == ({"effort": "high"}, "mock/other")
+    hello = answered_by(tmp_path, session)
+    assert (hello["model"], hello["params"]) == ("mock/other", {"effort": "high"})
 
 
 def test_v2_a_sub_agents_own_sub_agent_is_announced_on_its_session(acp2, tmp_path):
@@ -587,3 +605,60 @@ def test_v2_a_sub_agents_own_sub_agent_is_announced_on_its_session(acp2, tmp_pat
     assert message_text(updates, b) == "echo: deep"
     [call] = calls(updates, a)
     assert {"type": "session", "sessionId": b} in call["content"]
+
+
+def ids_of(updates, session, kind):
+    """Each entity's id of one kind, in the order first seen."""
+    return list(dict.fromkeys(u["messageId"] for u in of(updates, session) if u["sessionUpdate"] in (kind, kind + "_chunk")))
+
+
+def replay(acp2, session, cwd):
+    client = acp2()
+    client.call("session/resume", {"sessionId": session, "cwd": str(cwd), "replayFrom": {"type": "start"}})
+    return client.take_updates()
+
+
+def test_v2_messages_keep_their_ids_from_live_to_replay(acp2, tmp_path):
+    client = acp2()
+    session = client.call("session/new", {"cwd": str(tmp_path)})["sessionId"]
+    prompt_id = say(client, session, "hi")["messageId"]
+    live = client.until(idle(session))
+    client.close()
+    replayed = replay(acp2, session, tmp_path)
+    assert ids_of(live, session, "user_message") == ids_of(replayed, session, "user_message") == [prompt_id]
+    [answer_id] = ids_of(live, session, "agent_message")
+    assert ids_of(replayed, session, "agent_message") == [answer_id]
+    assert not answer_id.startswith(prompt_id)
+
+
+def test_v2_prompts_delivered_together_replay_as_their_own_messages(acp2, tmp_path):
+    client = acp2()
+    session = client.call("session/new", {"cwd": str(tmp_path)})["sessionId"]
+    client.send("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "!sleep 0.5"}]})
+    client.until(lambda updates: calls(updates, session))
+    later = {"_meta": {"io.github.wrongbad.akern/when": "idle"}}
+    a = client.send("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "one"}], **later})
+    b = client.send("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "two"}], **later})
+    first, second = (client.wait(r)["result"]["messageId"] for r in (a, b))
+    client.until(idle(session))  # idle items go in when the run's last turn ends, in the same run
+    client.close()
+    entries = [json.loads(line) for line in (tmp_path / "sessions" / f"{session}.jsonl").read_text().splitlines()]
+    [together] = [e for e in entries if len(e.get("meta", {}).get("items", [])) == 2]
+    assert [i["id"] for i in together["meta"]["items"]] == [first, second]
+    replayed = replay(acp2, session, tmp_path)
+    messages = {u["messageId"]: u["content"] for u in of(replayed, session, "user_message")}
+    assert messages[first] == [{"type": "text", "text": "one"}]
+    assert messages[second] == [{"type": "text", "text": "two"}]
+
+
+def test_v2_a_cancel_right_after_a_prompt_leaves_no_prompt_hanging(acp2, tmp_path):
+    client = acp2()
+    session = client.call("session/new", {"cwd": str(tmp_path)})["sessionId"]
+    request = client.send("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "!sleep 30"}]})
+    client.send("session/cancel", {"sessionId": session}, id=False)
+    response = client.wait(request)
+    if "error" in response:  # handed back before akern took it: never inserted
+        assert response["error"]["code"] == -32800
+        assert client.quiet_for(0.5) and not states(client.updates, session)
+    else:  # akern had started on it: the run ends cancelled
+        assert states(client.until(idle(session)), session)[-1]["stopReason"] == "cancelled"

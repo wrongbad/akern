@@ -11,12 +11,13 @@
    starts (--background hold), or sent at once (--background send), for clients that show
    updates between prompts.
 
-   Protocol 2 (a draft): a prompt is answered once akern has queued it, and may come while akern
-   works, so it steers the run at its next turn. A run is the foreground: state_update running,
-   then idle with its stop reason; jobs that outlive it are the background, listed on each
-   state_update, and say what they do whenever they do it. A shell call is a terminal its
-   output streams to. A shell call that runs a sub-agent (akern -s FILE, akern.md §5) is a child
-   session, its file read as it grows. */
+   Protocol 2 (a draft): a prompt is answered once akern delivers it into the conversation, and
+   may come while akern works, so it steers the run at its next turn. Message ids are akern's:
+   a prompt's is its inbox item's, an assistant message's its entry's, so they match on replay.
+   A run is the foreground: state_update running, then idle with its stop reason; jobs that outlive
+   it are the background, listed on each state_update, and say what they do whenever they do it. A
+   shell call is a terminal its output streams to. A shell call that runs a sub-agent (akern -s
+   FILE, akern.md §5) is a child session, its file read as it grows. */
 
 #include <ctype.h>
 #include <dirent.h>
@@ -77,9 +78,11 @@ typedef struct child {
     size_t ncalls, capcalls;
 } child;
 
-/* Protocol 2: a prompt sent to akern, answered when akern takes it. */
+/* Protocol 2: a prompt sent to akern, answered when akern delivers its item into the
+   conversation, or refused when an abort hands it back first. */
 typedef struct {
     long long ref;
+    char *item; /* its inbox item's id, from send's ok; NULL until then */
     json_buf request, prompt;
 } pending;
 
@@ -92,11 +95,14 @@ typedef struct {
     int to_child, from_child, child_err;
     buf out_partial, err_partial, err_text;
     bool ready, exited, run_open;
+    bool settled, restart; /* akern is idle; it is to start again with the model and effort */
     json_buf open_request; /* id of a session/new or session/load awaiting hello */
     prompt_state prompt;
     json_buf prompt_id;
     long long ref;
-    bool cancelled, abort_on_ok; /* a cancel that came before akern took the prompt */
+    bool cancelled;
+    char *prompt_item;     /* protocol 1: the open prompt's inbox item, from send's ok */
+    bool prompt_delivered; /* protocol 1: akern has put that item into the conversation */
     long long usage[4]; /* input, output, cache_read, cache_write */
     double updated_at;  /* when the last update went out during a prompt */
     buf held;           /* notification lines held while no prompt is open */
@@ -104,10 +110,9 @@ typedef struct {
     call *calls;
     size_t ncalls, capcalls;
     /* protocol 2 */
-    char *gen;           /* this akern's random tag, for ids unique across restarts */
     char *title;         /* reported in session_info_update; NULL until known */
     long long run;       /* the latest run */
-    json_buf message_id; /* the assistant message of the open turn */
+    json_buf message_id; /* the assistant message of the open turn: turn_start's id */
     bool resuming, closing;
     json_buf close_request;
     pending *pending;
@@ -274,6 +279,14 @@ static bool spawn_akern(session *s)
     strv_push(&argv, xstrdup(s->path));
     for (size_t i = 0; i < g.akern_args.n; i++)
         strv_push(&argv, xstrdup(g.akern_args.v[i]));
+    if (s->model) /* the session's model and effort: akern has them only from its flags */
+        strv_push(&argv, xstrdup("-m")), strv_push(&argv, xstrdup(s->model));
+    if (s->effort)
+    {
+        buf param = {0};
+        buf_printf(&param, "effort=%s", s->effort);
+        strv_push(&argv, xstrdup("-P")), strv_push(&argv, buf_cstr(&param));
+    }
     strv_push(&argv, NULL);
     pid_t pid = fork();
     if (pid == 0)
@@ -282,9 +295,6 @@ static bool spawn_akern(session *s)
         dup2(out[1], STDOUT_FILENO);
         dup2(err[1], STDERR_FILENO);
         signal(SIGPIPE, SIG_DFL);
-        struct stat st;
-        if (stat(s->path, &st) == 0 && st.st_size > 0)
-            unsetenv("AKERN_MODEL"); /* a session resumes with its own model, a switch included */
         if (s->cwd && chdir(s->cwd) < 0)
         {
             fprintf(stderr, "akern-acp: %s: %s\n", s->cwd, strerror(errno));
@@ -304,12 +314,11 @@ static bool spawn_akern(session *s)
         return false;
     }
     s->pid = pid;
-    free(s->gen);
-    s->gen = new_id();
     s->to_child = in[1];
     s->from_child = out[0];
     s->child_err = err[0];
-    s->ready = s->exited = s->run_open = false;
+    s->ready = s->exited = s->run_open = s->restart = false;
+    s->settled = true;
     s->out_partial.n = s->err_partial.n = s->err_text.n = 0;
     return true;
 }
@@ -640,28 +649,8 @@ static void note_progress(session *s, json event)
 
 /* ---- protocol 2: messages, tool calls, terminals, sub-agents ---- */
 
-static bool read_file(const char *path, buf *bytes);
 static void split_lines(buf *partial, span chunk, void (*fn)(void *, span), void *ctx);
 static void close_fd(int *fd);
-
-static void put_base64(buf *out, span bytes)
-{
-    static const char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const unsigned char *p = (const unsigned char *)bytes.p;
-    size_t i = 0;
-    for (; i + 2 < bytes.n; i += 3)
-    {
-        unsigned long v = (unsigned long)p[i] << 16 | (unsigned long)p[i + 1] << 8 | p[i + 2];
-        char quad[4] = {digits[v >> 18 & 63], digits[v >> 12 & 63], digits[v >> 6 & 63], digits[v & 63]};
-        buf_put(out, quad, 4);
-    }
-    if (i < bytes.n)
-    {
-        unsigned long v = (unsigned long)p[i] << 16 | (i + 1 < bytes.n ? (unsigned long)p[i + 1] << 8 : 0);
-        char quad[4] = {digits[v >> 18 & 63], digits[v >> 12 & 63], i + 1 < bytes.n ? digits[v >> 6 & 63] : '=', '='};
-        buf_put(out, quad, 4);
-    }
-}
 
 /* akern content (a string, or blocks) as an ACP content array: its text and images, or with
    `thinking` its thinking as text. Returns how many blocks it holds. */
@@ -1039,7 +1028,7 @@ static void flush_output(const char *session_id, call *c)
     if (!c->tail.n)
         return;
     buf data = {0};
-    put_base64(&data, buf_span(&c->tail));
+    buf_put_base64(&data, buf_span(&c->tail));
     notify(session_id, "{'sessionUpdate':'terminal_output_chunk','terminalId':%s,'data':%S}", c->id, buf_span(&data));
     c->tail.n = 0;
     buf_free(&data);
@@ -1324,7 +1313,9 @@ static void end_prompt(session *s, const char *stop, json error)
     }
     s->prompt = PROMPT_NONE;
     s->prompt_id.n = 0;
-    s->cancelled = s->abort_on_ok = false;
+    s->cancelled = s->prompt_delivered = false;
+    free(s->prompt_item);
+    s->prompt_item = NULL;
     memset(s->usage, 0, sizeof s->usage);
 }
 
@@ -1404,10 +1395,15 @@ static bool list_models(const char *program, strv *ids, buf *why)
         buf_put(&text, chunk, (size_t)n);
     }
     close(out[0]);
+    /* EOF on its stdout can come a moment before the program can be waited for, so it gets
+       until the deadline to exit. */
     int status = 0;
-    if (pid > 0 && waitpid(pid, &status, WNOHANG) == 0)
+    pid_t waited = pid;
+    while (pid > 0 && (waited = waitpid(pid, &status, WNOHANG)) == 0 && now_seconds() < deadline)
+        poll(NULL, 0, 5);
+    if (waited == 0)
         kill(pid, SIGKILL), waitpid(pid, &status, 0), buf_puts(why, "timed out");
-    else if (pid < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    else if (waited < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
         buf_puts(why, "failed");
     for (char *line = strtok(buf_cstr(&text), "\n"); line; line = strtok(NULL, "\n"))
     {
@@ -1523,23 +1519,25 @@ static void send_config_options(session *s)
     buf_free(&options);
 }
 
+static void restart_akern(session *s);
+
+/* Another model or effort is another akern on the same file, started once this one is idle. */
 static void apply_model(session *s, const char *model)
 {
-    send_to_child(s, "{'type':'append','entry':{'type':'settings','model':%s}}", model);
     free(s->model);
     s->model = xstrdup(model);
+    s->restart = true;
+    restart_akern(s);
 }
 
-/* Replaces the session's params: {"effort": level}, or none for the provider's default. */
+/* The session's params: {"effort": level}, or none for the provider's default. */
 static void apply_effort(session *s, const char *level)
 {
     bool clear = !level || !strcmp(level, "default");
-    if (clear)
-        send_to_child(s, "{'type':'append','entry':{'type':'settings','params':{}}}");
-    else
-        send_to_child(s, "{'type':'append','entry':{'type':'settings','params':{'effort':%s}}}", level);
     free(s->effort);
     s->effort = clear ? NULL : xstrdup(level);
+    s->restart = true;
+    restart_akern(s);
     if (!g.v2) /* protocol 2's callers answer with the options, or send them */
         send_config_options(s);
 }
@@ -1705,25 +1703,56 @@ static pending *find_pending(session *s, json ref)
     return NULL;
 }
 
+static pending *find_pending_item(session *s, json item)
+{
+    for (size_t i = 0; i < s->npending; i++)
+        if (s->pending[i].item && json_eq(item, s->pending[i].item))
+            return &s->pending[i];
+    return NULL;
+}
+
 static void drop_pending(session *s, pending *p)
 {
+    free(p->item);
     buf_free(&p->request);
     buf_free(&p->prompt);
     *p = s->pending[--s->npending];
 }
 
-/* A prompt akern has taken: answered with the id of the user message it is. */
-static void prompt_taken(session *s, pending *p)
+/* A prompt akern has put into the conversation: answered with its item's id, which is also the
+   id it replays under (meta.items). */
+static void prompt_inserted(session *s, pending *p)
 {
-    buf id = {0};
-    buf_printf(&id, "%s-p%lld", s->gen, p->ref);
-    respond(buf_span(&p->request), "{'messageId':%S}", buf_span(&id));
-    notify(s->id, "{'sessionUpdate':'user_message','messageId':%S,'content':%R}", buf_span(&id), buf_span(&p->prompt));
+    respond(buf_span(&p->request), "{'messageId':%s}", p->item);
+    notify(
+        s->id,
+        "{'sessionUpdate':'user_message','messageId':%s,'content':%R}",
+        p->item,
+        buf_span(&p->prompt)
+    );
     note_title(s, buf_span(&p->prompt));
     drop_pending(s, p);
-    buf_free(&id);
-    if (s->abort_on_ok)
-        send_to_child(s, "{'type':'abort'}"), s->abort_on_ok = false;
+}
+
+/* Prompts whose items an abort handed back: never inserted, so refused as cancelled. */
+static void prompts_returned(session *s, json items)
+{
+    jiter it = json_iter(items);
+    for (json item; json_next(&it, NULL, &item);)
+    {
+        pending *p = find_pending_item(s, item);
+        if (p)
+        {
+            respond_error(buf_span(&p->request), -32800, S("cancelled before akern took it"));
+            drop_pending(s, p);
+        }
+    }
+}
+
+/* True for a message line holding a reply. */
+static bool is_reply(json e)
+{
+    return json_eq(json_get(json_get(e, "message"), "role"), "assistant");
 }
 
 static void on_event2(session *s, json e)
@@ -1738,10 +1767,7 @@ static void on_event2(session *s, json e)
             answer_open2(s);
     }
     else if (json_eq(type, "turn_start"))
-    {
-        s->message_id.n = 0;
-        buf_printf(&s->message_id, "%s-%lld-%lld", s->gen, (long long)json_get_num(json_get(e, "run"), 0), (long long)json_get_num(json_get(e, "turn"), 0));
-    }
+        buf_set(&s->message_id, json_get_escaped_body(json_get(e, "id")));
     else if (json_eq(type, "text_delta") || json_eq(type, "thinking_delta"))
         notify(
             s->id,
@@ -1750,7 +1776,7 @@ static void on_event2(session *s, json e)
             buf_span(&s->message_id),
             json_get(e, "text")
         );
-    else if (json_eq(type, "message") && json_eq(json_get(e, "source"), "assistant"))
+    else if (json_eq(type, "message") && is_reply(e))
         send_assistant(s->id, buf_span(&s->message_id), json_get(json_get(e, "message"), "content"));
     else if (json_eq(type, "tool_start"))
     {
@@ -1791,7 +1817,19 @@ static void on_event2(session *s, json e)
     else if (json_eq(type, "turn_end"))
         add_usage(s, json_get(e, "usage"));
     else if (json_eq(type, "ok") && find_pending(s, json_get(e, "ref")))
-        prompt_taken(s, find_pending(s, json_get(e, "ref")));
+        find_pending(s, json_get(e, "ref"))->item = json_decode_dup(json_get(e, "item"));
+    else if (json_eq(type, "message") && json_get(json_get(e, "meta"), "items").p)
+    {
+        jiter it = json_iter(json_get(json_get(e, "meta"), "items"));
+        for (json item; json_next(&it, NULL, &item);)
+        {
+            pending *p = find_pending_item(s, json_get(item, "id"));
+            if (p)
+                prompt_inserted(s, p);
+        }
+    }
+    else if (json_eq(type, "returned"))
+        prompts_returned(s, json_get(e, "items"));
     else if (json_eq(type, "error") && json_eq(json_get(e, "where"), "command") && find_pending(s, json_get(e, "ref")))
     {
         pending *p = find_pending(s, json_get(e, "ref"));
@@ -1811,6 +1849,7 @@ static void on_event2(session *s, json e)
     else if (json_eq(type, "run_end"))
     {
         s->run_open = false;
+        prompts_returned(s, json_get(e, "items"));
         json reason = json_get(e, "reason");
         if (json_eq(reason, "error"))
             send_state(s, "idle", "error", json_get(e, "error"));
@@ -1820,6 +1859,16 @@ static void on_event2(session *s, json e)
     }
     else if (json_eq(type, "error") && json_eq(json_get(e, "where"), "command"))
         warn("session %s: akern refused a command: %.*s", s->id, (int)e.n, e.p);
+}
+
+/* True if a list of items (ids, or objects with an id) names this one. */
+static bool has_item(json items, const char *id)
+{
+    jiter it = json_iter(items);
+    for (json item; json_next(&it, NULL, &item);)
+        if (json_eq(json_is(item, '{') ? json_get(item, "id") : item, id))
+            return true;
+    return false;
 }
 
 static void on_event(session *s, json e)
@@ -1858,7 +1907,7 @@ static void on_event(session *s, json e)
         update(s, false, "{'sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':%R}}", json_get(e, "text"));
     else if (json_eq(type, "turn_start"))
         s->streamed = false;
-    else if (json_eq(type, "message") && json_eq(json_get(e, "source"), "assistant"))
+    else if (json_eq(type, "message") && is_reply(e))
         note_assistant(s, json_get(e, "message"));
     else if (json_eq(type, "tool_start"))
         open_call(s, json_get(e, "call"), json_get(e, "name"), json_get(e, "input"), false);
@@ -1871,9 +1920,19 @@ static void on_event(session *s, json e)
     else if (json_eq(type, "ok") && s->prompt == PROMPT_SENT && json_get_num(json_get(e, "ref"), -1) == (double)s->ref)
     {
         s->prompt = PROMPT_QUEUED;
-        if (s->abort_on_ok)
-            send_to_child(s, "{'type':'abort'}"), s->abort_on_ok = false;
+        free(s->prompt_item);
+        s->prompt_item = json_decode_dup(json_get(e, "item"));
     }
+    else if (
+        json_eq(type, "message") && s->prompt_item &&
+        has_item(json_get(json_get(e, "meta"), "items"), s->prompt_item)
+    )
+        s->prompt_delivered = true;
+    else if (
+        json_eq(type, "returned") && s->prompt == PROMPT_QUEUED && s->prompt_item &&
+        has_item(json_get(e, "items"), s->prompt_item)
+    )
+        end_prompt(s, "cancelled", NOSPAN);
     else if (json_eq(type, "run_start"))
         s->run_open = true;
     else if (json_eq(type, "run_end"))
@@ -1897,20 +1956,8 @@ static void on_event(session *s, json e)
 
 typedef struct {
     span line;
-    json id, parent;
+    json id;
 } entry;
-
-static bool read_file(const char *path, buf *bytes)
-{
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return false;
-    char chunk[65536];
-    for (size_t n; (n = fread(chunk, 1, sizeof chunk, f)) > 0;)
-        buf_put(bytes, chunk, n);
-    fclose(f);
-    return true;
-}
 
 static bool same_string(json a, json b)
 {
@@ -1918,17 +1965,61 @@ static bool same_string(json a, json b)
     return json_is(a, '"') && json_is(b, '"') && x.n == y.n && !memcmp(x.p, y.p, x.n);
 }
 
-/* Protocol 2: a message replayed whole, by its entry's id; its calls opened and closed. */
-static void replay_message2(session *s, json message, json entry_id)
+/* Protocol 2: the user messages a delivery holds, one per prompt or inject item that meta.items
+   names, under the item's id as it was live, with that item's blocks. Without meta.items, one
+   message under the entry's id. */
+static void replay_user_messages(session *s, json content, json items, span entry_id)
+{
+    if (!items.p)
+    {
+        json_buf blocks = {0};
+        if (put_acp_blocks(&blocks, content, false))
+            notify(
+                s->id,
+                "{'sessionUpdate':'user_message','messageId':%S,'content':%R}",
+                entry_id,
+                buf_span(&blocks)
+            );
+        buf_free(&blocks);
+        return;
+    }
+    jiter items_it = json_iter(items);
+    for (json item; json_next(&items_it, NULL, &item);)
+    {
+        if (json_eq(json_get(item, "source"), "job"))
+            continue; /* a job's result closes its call */
+        double at = json_get_num(json_get(item, "at"), -1),
+               n = json_get_num(json_get(item, "blocks"), 0);
+        json_list own = {0};
+        jiter it = json_iter(content);
+        double i = 0;
+        for (json block; json_next(&it, NULL, &block); i++)
+            if (i >= at && i < at + n)
+                json_printf(&own, "%r%R", own.n ? "," : "", block);
+        json_buf array = {0}, blocks = {0};
+        json_printf(&array, "[%r]", buf_cstr(&own));
+        if (put_acp_blocks(&blocks, buf_span(&array), false))
+            notify(
+                s->id,
+                "{'sessionUpdate':'user_message','messageId':%R,'content':%R}",
+                json_get(item, "id"),
+                buf_span(&blocks)
+            );
+        buf_free(&own);
+        buf_free(&array);
+        buf_free(&blocks);
+    }
+}
+
+/* Protocol 2: a message replayed whole, by its entry's id (a user message by its items' ids);
+   its calls opened and closed. */
+static void replay_message2(session *s, json message, json entry_id, json meta)
 {
     span id = json_get_escaped_body(entry_id);
     json content = json_get(message, "content");
     if (json_eq(json_get(message, "role"), "user"))
     {
-        json_buf blocks = {0};
-        if (put_acp_blocks(&blocks, content, false))
-            notify(s->id, "{'sessionUpdate':'user_message','messageId':%S,'content':%R}", id, buf_span(&blocks));
-        buf_free(&blocks);
+        replay_user_messages(s, content, json_get(meta, "items"), id);
         jiter it = json_iter(content);
         for (json block; json_next(&it, NULL, &block);)
         {
@@ -1976,9 +2067,9 @@ static void replay_message(session *s, json message)
     }
 }
 
-/* The messages on the chain from the head (the last entry) to a root, oldest first; a replace
-   entry's message stands in for its target's (akern.md §5). Without `send`, only the settings
-   are read. */
+/* The context: the messages after the last reset entry, oldest first; a replace entry's message
+   stands in for its target's (akern.md §5). The model and effort are the last hello's: akern
+   says them there each start. Without `send`, only those are read. */
 static void replay_session(session *s, bool send)
 {
     buf bytes = {0};
@@ -1997,19 +2088,28 @@ static void replay_session(session *s, bool send)
         p = nl + 1;
         if (!json_is_valid(line))
             continue;
-        entry e = {line, json_get(line, "id"), json_get(line, "parent")};
-        if (e.id.p)
+        if (json_eq(json_get(line, "type"), "hello"))
+        {
+            free(s->model), free(s->effort);
+            s->model = json_decode_dup(json_get(line, "model"));
+            s->effort = json_decode_dup(json_get(json_get(line, "params"), "effort"));
+        }
+        entry e = {line, json_get(line, "id")};
+        if (!e.id.p)
+            continue;
+        /* a message sits where the first line with its id is: its reply's turn_start */
+        bool placed = false;
+        for (size_t i = n; json_eq(json_get(line, "type"), "message") && !placed && i-- > 0;)
+            if (same_string(entries[i].id, e.id) &&
+                json_eq(json_get(entries[i].line, "type"), "turn_start"))
+                entries[i] = e, placed = true;
+        if (!placed)
             VEC_PUSH(entries, n, cap, e);
     }
-    /* A parent is always earlier in the file than its child, so the walk only goes back. */
-    size_t *chain = xcalloc(n + 1, sizeof *chain), depth = 0;
-    json at = n ? entries[n - 1].id : NOSPAN;
-    for (size_t i = n; at.p && i-- > 0;)
-        if (same_string(entries[i].id, at))
-        {
-            chain[depth++] = i;
-            at = json_is(entries[i].parent, '"') ? entries[i].parent : NOSPAN;
-        }
+    size_t context_start = 0;
+    for (size_t i = 0; i < n; i++)
+        if (json_eq(json_get(entries[i].line, "type"), "reset"))
+            context_start = i + 1;
     /* replace entries, read once: the last one for a target wins */
     entry *replaces = NULL;
     size_t nreplaces = 0, capreplaces = 0;
@@ -2017,34 +2117,28 @@ static void replay_session(session *s, bool send)
         if (json_eq(json_get(entries[i].line, "type"), "replace") &&
             json_is(json_get(entries[i].line, "message"), '{'))
         {
-            entry r = {json_get(entries[i].line, "message"), json_get(entries[i].line, "target"), NOSPAN};
+            entry r = {json_get(entries[i].line, "message"), json_get(entries[i].line, "target")};
             VEC_PUSH(replaces, nreplaces, capreplaces, r);
         }
-    while (depth-- > 0)
+    for (size_t i = 0; i < n; i++)
     {
-        entry *e = &entries[chain[depth]];
-        json params = json_get(e->line, "params");
-        if (json_eq(json_get(e->line, "type"), "settings") && json_is(params, '{'))
-        {
-            free(s->effort);
-            s->effort = json_decode_dup(json_get(params, "effort"));
-        }
-        if (!send || !json_eq(json_get(e->line, "type"), "message"))
+        entry *e = &entries[i];
+
+        if (!send || i < context_start || !json_eq(json_get(e->line, "type"), "message"))
             continue;
         json message = json_get(e->line, "message");
-        for (size_t i = nreplaces; i-- > 0;)
-            if (same_string(replaces[i].id, e->id))
+        for (size_t r = nreplaces; r-- > 0;)
+            if (same_string(replaces[r].id, e->id))
             {
-                message = replaces[i].line;
+                message = replaces[r].line;
                 break;
             }
         if (g.v2)
-            replay_message2(s, message, e->id);
+            replay_message2(s, message, e->id, json_get(e->line, "meta"));
         else
             replay_message(s, message);
     }
     free(replaces);
-    free(chain);
     free(entries);
     buf_free(&bytes);
 }
@@ -2196,7 +2290,9 @@ static bool run_command(session *s, json id, json prompt)
     {
         /* a command handled here runs from idle to idle; its prompt is a live-only message */
         buf message_id = {0};
-        buf_printf(&message_id, "%s-c%lld", s->gen, ++s->ref);
+        char *unique = new_id();
+        buf_printf(&message_id, "command-%s", unique); /* never an akern id, which is 8 hex */
+        free(unique);
         respond(id, "{'messageId':%S}", buf_span(&message_id));
         notify(s->id, "{'sessionUpdate':'user_message','messageId':%S,'content':%R}", buf_span(&message_id), prompt);
         bool idle = !s->run_open;
@@ -2253,6 +2349,7 @@ static void prompt(json id, json params)
     flush_held(s);
     if (run_command(s, id, json_get(params, "prompt")))
         return;
+    s->settled = false; /* until akern says so: a switch now waits for this prompt's work */
     json_list blocks = {0};
     put_prompt_content(&blocks, json_get(params, "prompt"));
     if (!blocks.n)
@@ -2302,11 +2399,9 @@ static void cancel2(json params)
         cancel_call(c);
     if (!s || (!s->run_open && !s->npending))
         return;
+    /* akern hands back what it has not delivered, and prompts_returned refuses those */
     s->cancelled = true;
-    if (s->npending)
-        s->abort_on_ok = true;
-    if (s->run_open)
-        send_to_child(s, "{'type':'abort'}");
+    send_to_child(s, "{'type':'abort'}");
 }
 
 /* tool_call/cancel and terminal/cancel: the call's process group gets SIGTERM. */
@@ -2407,12 +2502,10 @@ static void cancel(json params)
     if (!s || s->prompt == PROMPT_NONE)
         return;
     s->cancelled = true;
-    if (s->prompt == PROMPT_SENT)
-        s->abort_on_ok = true; /* an abort now could reach akern while it is still idle */
-    else if (s->run_open)
-        send_to_child(s, "{'type':'abort'}");
-    else
+    if (s->prompt == PROMPT_QUEUED && s->prompt_delivered && !s->run_open)
         end_prompt(s, "cancelled", NOSPAN); /* only jobs are left: they keep running */
+    else
+        send_to_child(s, "{'type':'abort'}"); /* ends the run, or hands the prompt back */
 }
 
 static void set_model(json id, json params, json model)
@@ -2555,8 +2648,14 @@ static void on_client_line(void *ctx, span line)
 static void on_child_line(void *ctx, span line)
 {
     session *s = ctx;
-    if (json_is_valid(line))
-        on_event(s, json_trim(line));
+    if (!json_is_valid(line))
+        return;
+    json e = json_trim(line), type = json_get(e, "type");
+    if (json_eq(type, "queued") || json_eq(type, "run_start"))
+        s->settled = false;
+    else if (json_eq(type, "settled"))
+        s->settled = true;
+    on_event(s, e);
 }
 
 static void on_child_err_line(void *ctx, span line)
@@ -2656,6 +2755,25 @@ static bool read_into(int *fd, buf *partial, void (*fn)(void *, span), void *ctx
     }
     split_lines(partial, (span){chunk, (size_t)n}, fn, ctx);
     return true;
+}
+
+/* The akern of a session, told EOF once it is idle so that it exits, and started again: a new
+   model or effort takes a new start (akern.md §2). */
+static void restart_akern(session *s)
+{
+    if (s->open_request.n || !s->settled || s->exited || s->to_child < 0)
+        return; /* when it is: once settled, or the next prompt's start */
+    s->restart = false;
+    close_fd(&s->to_child);
+    fcntl(s->from_child, F_SETFL, fcntl(s->from_child, F_GETFL) & ~O_NONBLOCK);
+    char *model = s->model, *effort = s->effort; /* the choice, which the old hello would undo */
+    s->model = s->effort = NULL;
+    while (s->from_child >= 0 && read_into(&s->from_child, &s->out_partial, on_child_line, s))
+        ;
+    child_ended(s);
+    free(s->model), free(s->effort);
+    s->model = model, s->effort = effort;
+    spawn_akern(s);
 }
 
 /* ---- the loop ---- */
@@ -2761,10 +2879,11 @@ static void remove_closed(void)
             forget_call(s, &s->calls[0]);
         while (s->npending)
             drop_pending(s, &s->pending[0]);
+        free(s->prompt_item);
         for (size_t j = 0; j < s->nchildren; j++)
             free_child(s->children[j]);
         free(s->children), free(s->pending), free(s->calls);
-        free(s->id), free(s->cwd), free(s->path), free(s->model), free(s->effort), free(s->gen), free(s->title);
+        free(s->id), free(s->cwd), free(s->path), free(s->model), free(s->effort), free(s->title);
         buf_free(&s->out_partial), buf_free(&s->err_partial), buf_free(&s->err_text), buf_free(&s->held);
         buf_free(&s->open_request), buf_free(&s->prompt_id), buf_free(&s->message_id), buf_free(&s->close_request);
         free(s);
@@ -2834,6 +2953,9 @@ static void run(void)
                 child_ended(s);
         }
         send_due_progress();
+        for (size_t i = 0; i < g.nsessions; i++)
+            if (g.sessions[i]->restart)
+                restart_akern(g.sessions[i]);
         remove_closed();
     }
 }

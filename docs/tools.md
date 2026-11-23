@@ -31,7 +31,7 @@ The schemas as shipped, without the descriptions. Every field has a
 defaults, so the model has what it needs where it reads the field.
 
 ```json
-{"name":"shell","program":"bash","input_schema":{"type":"object","properties":{
+{"name":"shell","program":"akern-shell","input_schema":{"type":"object","properties":{
    "command":{"type":"string"},
    "stdin":{"type":"string"},
    "eof":{"type":"boolean"},
@@ -53,24 +53,39 @@ defaults, so the model has what it needs where it reads the field.
 
 | Call | Runs, with `PROGRAM` the tool's `program` | stdin |
 |---|---|---|
-| `shell {command, stdin}` | `PROGRAM -c COMMAND` | `stdin` |
+| `shell {command, stdin, output_limit, stdout_name}` | `PROGRAM -c COMMAND [--output-limit N] [--stdout-name NAME]` | `stdin` |
 | `edit {path, old, new, all}` | `PROGRAM PATH OLD NEW [--all]` | empty |
 | `job {id, …}` | nothing: the kernel acts on the job ([below](#job)) | |
 
-The program runs by name, so its `argv[0]` is its own: busybox, which picks
-what to run from `argv[0]`, runs its `sh`. A `PATH` that starts with `-` is
-passed as `./PATH`. Because every call runs a program, a wrapper named as a
-tool's `program`, or a shim earlier on `PATH` (§2), sees, refuses or rewrites
-every call of a tool. `edit` calls are like `shell` calls in every other way: they run in parallel, count against `--max-processes`, become jobs
-when a message arrives first, and are killed by `abort`. Their result is the
-program's output (stdout and stderr share a pipe, as for `shell`) when it
-exits 0; otherwise an error: that output without its final newline, else
-`PROGRAM: exit N`.
+A `PATH` that starts with `-` is passed as `./PATH`. Because every call runs a
+program, a wrapper named as a tool's `program`, or a shim earlier on `PATH`
+(§2), sees, refuses or rewrites every call of a tool. `edit` calls are like
+`shell` calls in every other way: they run in parallel, count against
+`--max-processes`, become jobs when a message arrives first, and are killed by
+`abort`.
 
-**bash or sh.** `make` installs `tools.json` as is when `bash` is on `PATH`;
-otherwise with `sh` as the shell's `program` and in its description ("Run a
-command with sh and …"), so the model is told the syntax that runs. The kernel and
-the system-prompt program know nothing of either.
+**A program's side.** Every program the kernel runs for a call gets the same:
+
+| | |
+|---|---|
+| stdin | a pipe: the `stdin` text, then EOF; with `eof: false`, EOF after a `job` call with `eof` |
+| stdout, stderr | one pipe for both, as `2>&1`, in the order written; streamed as `tool_progress` |
+| fd 3 | a pipe for the result: a JSON array of content blocks. A program that writes nothing there is answered with what it printed (at most 100000 bytes), and, when it failed, as an error: that without its final newline, else `PROGRAM: exit N` |
+| `AKERN_OUT` | `<session>.d/calls/<call>.out` ([akern.md §5](akern.md#layout)), the file for its whole output, written by the program if at all |
+| exit status | anything but `0`, or a kill, sets `is_error` |
+| process group | its own, so a signal to the group reaches everything it started |
+| environment, cwd | the kernel's, plus [akern.md §1](akern.md#set-for-children) |
+
+Nothing else passes between a program and the kernel. The shell's program is
+[akern-shell](#akern-shell), which formats the result; a wrapper named as the
+shell's `program` gets the same arguments and, unless it writes fd 3 (`exec
+akern-shell "$@"` does), returns what it printed as is.
+
+**bash or sh.** `akern-shell` runs `bash`, else `sh`. `make` installs
+`tools.json` as is when `bash` is on `PATH`; otherwise with `sh` in the
+shell's description ("Run a command with sh and …"), so the model is told the
+syntax that runs. The kernel and the system-prompt program know nothing of
+either.
 
 | Call | Result |
 |---|---|
@@ -80,35 +95,30 @@ the system-prompt program know nothing of either.
 
 Every result is a `tool_result` (for a job, a late one, which also names how it ended) with a
 block array as `content`; an empty text becomes `(empty)`. How calls run in
-parallel, wake the turn and become jobs: [calls.h](../akern/calls.h) and **Jobs** below.
+parallel, wake the turn and become jobs: [tools.c](../akern/tools.c) and **Jobs** below.
 
 ### shell
 
 | Field | Meaning |
 |---|---|
-| `command` | run as `bash -c COMMAND` (or the shell's `program`), a fresh shell in the kernel's working directory each time: `cd`, variables and activated environments do not carry over to the next call. For a single simple command, bash runs it in its own place, so the pid is the program's |
+| `command` | run by [akern-shell](#akern-shell) as `bash -c COMMAND`, a fresh shell in the kernel's working directory each time: `cd`, variables and activated environments do not carry over to the next call. The call's pid is akern-shell's, and its process group the command's |
 | `stdin` | text written to the program's stdin, which is then closed (unless `eof: false`). No escaping, no argument size limit: `cat > path` with the file's text here is how the model writes a file |
 | `eof` | `false`: stdin stays open after the `stdin` text; the model sends more with `job {id, stdin}` and ends it with `job {id, eof: true}`. Default `true` |
 | `wait` | seconds the turn waits for the command; absent, until it finishes. When it runs out, or a message arrives first, the call is answered pending and runs on as a job. `0`: a job from the start (a server, a watcher, a sub-agent it steers). `false` and `true` are taken as `0` and absent |
 | `stdout_name` | the `name` of a document block (below) |
 | `output_limit` | bytes of output kept in the result; default 100000; ignored for an image or PDF |
 
-| Program side | |
+What akern-shell does with the command (§1 has the rest of a program's side):
+
+| | |
 |---|---|
-| stdin | a pipe: the `stdin` text, then EOF; EOF at once without it; with `eof: false`, EOF after a `job` call with `eof` |
-| stdout, stderr | one pipe for both, as `2>&1`: the output in the order it was written (as the program flushes it: most programs buffer stdout to a pipe but not stderr), collected in full |
-| exit status | reported as is; anything but `0` sets `is_error` |
-| process group | its own, so a signal to the group reaches everything it started |
-| environment, cwd | the kernel's, plus [akern.md §1](akern.md#set-for-children) |
-| not found | the shell's message on stderr, exit 127 (`bash: no-such: command not found`); a missing shell, `bash: No such file or directory`, exit 127 |
+| shell | `bash -c COMMAND`, else `sh -c COMMAND`; its stdout and stderr on one pipe, in the order written (as the program flushes it: most programs buffer stdout to a pipe but not stderr) |
+| output | passed on to the kernel as it comes, and written whole to `AKERN_OUT` |
+| exit status | akern-shell exits as the command did; anything but `0` sets `is_error` |
+| signals | a signal to the call's process group reaches the command; akern-shell outlives it to write the result |
+| not found | the shell's message on stderr, exit 127 (`bash: no-such: command not found`) |
 
-Nothing else passes between the program and the kernel; a program cannot
-change how its call is handled. A wrapper named as the shell's `program` gets
-`-c COMMAND` and can refuse it (exit non-zero, a reason on stderr) or run
-something else, e.g. `exec bash "$@"`; its output and exit status are the
-result.
-
-**Result.** One text block, plain text, so code and logs reach the model
+**Result.** akern-shell's, on fd 3: one text block, plain text, so code and logs reach the model
 unescaped. Its first line is always a header in brackets; everything after
 that line is the output, as is. The header is there even for `[exit 0]`, so
 that a line the program prints that looks like one is only ever output: the
@@ -117,9 +127,9 @@ program cannot write before it. The header's parts, in this order, joined by
 
 | Part | When |
 |---|---|
-| `exit N`, `signal N` | always: how it ended; `killed, signal N` (or `killed, exit N` when it caught the signal) when the kernel killed it: `abort` with `jobs`, or shutdown; `killed: output over 67108864 bytes, signal N` when its kept output passed 64 MiB |
+| `exit N`, `signal N` | always: how the command ended. When the kernel killed it (`abort` with `jobs`, or shutdown), a job's result says `killed` in its `status` |
 | `cut at N of M bytes, all of it in FILE` | the output was longer than `output_limit`: the result keeps its first N bytes (a character cut in two shows as U+FFFD) and all of it is in FILE |
-| `M bytes of binary output not shown` | the output is not text: a NUL byte, or more than one byte in eight outside UTF-8, in its first 8 KiB. `M bytes of image/png not shown` (or another type, below) when the program failed. `, all of it in FILE` follows when it spilled |
+| `M bytes of binary output not shown, all of it in FILE` | the output is not text: a NUL byte, or more than one byte in eight outside UTF-8, in its first 8 KiB. `M bytes of image/png not shown` (or another type, below) when the program failed |
 
 When FILE could not be created or written, `, saving all of it to FILE failed:
 REASON` replaces `, all of it in FILE` (`saving output to FILE failed: REASON`
@@ -138,7 +148,7 @@ every provider carries `is_error`.
 Output is UTF-8 text; invalid bytes become U+FFFD.
 
 **Images and PDFs.** When the output starts with the signature of a format
-every provider takes, the kernel keeps all of it and, if the program succeeds,
+every provider takes, akern-shell keeps all of it (up to 32 MiB) and, if the program succeeds,
 returns it as a media block. Since stderr shares the pipe, a message the
 program writes there lands inside the image; the description tells the model
 to send stderr elsewhere (`magick in.tiff png:- 2>err.txt`).
@@ -158,9 +168,8 @@ cut short, and a provider refuses a broken image. A block the API rejects is rep
 
 **Jobs.** A call still running when its turn is answered (its `wait` ran
 out, or a message arrived first), or started with `wait: 0`, is a job named by
-its call id. From the moment it is answered pending (or starts) its output is
-written whole to `<session>.d/calls/<call>.out` (output that already spilled
-keeps its file). The provider tells the model so in a placeholder answer that
+its call id. Its output is in `<session>.d/calls/<call>.out` as it comes,
+as is every shell call's. The provider tells the model so in a placeholder answer that
 names the job and that file ([providers.md §5](providers.md#5-messages)). The model watches with `tail`, acts on it with [job](#job), and waits by
 ending its turn (its late result starts a new one) or with `job`'s `wait`. Its output is also forwarded live as `tool_progress` events, except an image's or PDF's.
 
@@ -231,6 +240,20 @@ case "$1" in */.ssh/*) echo "akern-edit: $1: refused" >&2; exit 1;; esac
 PATH="${PATH#*:}" exec akern-edit "$@"
 ```
 
+### akern-shell
+
+`tools/akern-shell.c`: the program behind `shell` (§1), which turns a command's
+output into its result.
+
+```
+akern-shell -c COMMAND [--output-limit N] [--stdout-name NAME]
+```
+
+Runs `bash -c COMMAND` (`sh` where there is no bash), passes its output on to
+stdout as it comes and writes all of it to `$AKERN_OUT`, then writes the
+result described under [shell](#shell) to fd 3, or to stdout when fd 3 is not
+open, so a person can run it by hand. Exits as the command did.
+
 ### akern-edit
 
 `tools/akern-edit.c`, self-contained C: the program behind `edit` (§1).
@@ -247,6 +270,55 @@ Replaces OLD with NEW byte for byte; OLD must match exactly once unless
 | 0 | `--help` alone or no arguments: the usage line |
 | 0 | `Edited PATH: replaced N occurrence(s). First change at line L:` and the changed lines with 3 lines of context, numbered |
 | 1 | on stderr, `akern-edit: PATH: ` and one of `OLD must not be empty`, `OLD text not found`, `OLD text matches N times`, or the system's reason; wrong arguments: `akern-edit: usage: …` |
+
+### akern-agent
+
+`tools/akern-agent.c`: a sub-agent that speaks [ACP](acp-v2.md) protocol 2,
+run the way `akern -p` runs an akern sub-agent ([akern.md](akern.md#sub-agents)),
+so the model delegates to any ACP agent with the same habits: a task as an
+argument, the answer on stdout, steering lines on stdin, the same `-s` to
+continue. It is an ACP client, the other side of `akern-acp` (§5).
+
+```
+akern-agent [-a AGENT_COMMAND] [-s SESSION.jsonl] [-C DIR] [-m MODEL] [-o ID=VALUE]...
+            [--allow] PROMPT...
+```
+
+| Flag | Meaning |
+|---|---|
+| `-a`, `--agent` | the command that starts the agent, run with `/bin/sh -c` in the session's cwd. Required for a new session; a continued one uses the command in its header |
+| `-s`, `--session` | the session file: created if missing, continued (`session/resume`, no replay) if it holds a header. Locked with `fcntl` while in use; held: exit 2. Default, `$TMPDIR/akern-agent-XXXXXX` |
+| `-C`, `--cwd` | the session's `cwd`; default, the current directory, or a continued session's own |
+| `-m`, `--model` | `-o model=VALUE` |
+| `-o`, `--option` | `session/set_config_option` before the prompt: the option whose `configId`, else whose `category`, is `ID`; a select's choice by value, else by value or name ignoring case; a boolean as `true`/`false`. Unknown: exit 2, listing the options or choices |
+| `--allow` | permission requests are answered with `allow_once` (else `allow_always`) |
+
+| What | How |
+|---|---|
+| handshake | `initialize` with `protocolVersion` 2 and no client capabilities; an agent that answers another version: exit 2 |
+| prompt | the arguments, joined with spaces, as one text block |
+| stdin | each line while it runs: plain text is a `session/prompt`; `{"type":"send","content":…}` too, after a `session/cancel` when `"when":"now"`; `{"type":"abort"}` is `session/cancel`. EOF changes nothing |
+| stdout | at each `state_update` `idle` of its session: the text of the last agent message with text since the previous one, and `\n` unless it ends in one |
+| done | every prompt answered (inserted), the session `idle` in a state reported after the last answer or after work begun since the last prompt, and its `background` list empty or not reported, for 0.5 s. Then it closes the agent's stdin, and after 5 s sends `SIGTERM`, after 2 s more `SIGKILL` |
+| permission | without `--allow`: answered `reject_once` (else `cancelled`), then `session/cancel`, so the work stops now; stderr names what was refused and how to continue |
+| other agent requests | `-32601` (it offers no elicitation) |
+| child sessions | their updates and requests go to the file and through the same permission policy; they print nothing |
+| signals | `SIGINT`, `SIGTERM`, `SIGHUP`: `session/cancel`, the agent stopped as above, exit 130 |
+
+| Exit | When |
+|---|---|
+| 0 | done; a stop reason other than `end_turn` or `cancelled` is named on stderr |
+| 1 | the last idle was `stopReason: error` (its message on stderr); the agent exited before it was done (with the end of its stderr); or it refused the first prompt |
+| 2 | usage; the session file cannot be opened, is not one, or is in use; setup failed (the agent would not start, `initialize`, `session/new`, `session/resume` or an option failed, with the agent's message) |
+| 3 | done, and a permission request was refused |
+| 130 | a signal |
+
+The session file is JSON lines: a header `{"type":"acp_session","sessionId",
+"agent","cwd"}`, then every line of the connection as `{"in": MESSAGE}` from
+the agent or `{"out": MESSAGE}` to it, byte for byte (a line from the agent
+that is not JSON: `{"in_text": "…"}`). The agent's stderr is appended to
+`SESSION.jsonl.stderr`. The agent runs in `akern-agent`'s process group, so a
+parent's signal to the job reaches both.
 
 ### AKERN_ASK
 
@@ -290,6 +362,7 @@ description: How to use this agent harness
 | Shipped | Covers |
 |---|---|
 | `skills/akern` | sub-agents: the `akern` command's flags, exit codes and stdin, steering, watching and continuing one, with examples ([akern.md](akern.md#sub-agents)) |
+| `skills/acp` | sub-agents that speak ACP: the `akern-agent` command, permissions, steering, continuing one, with examples ([§2](#akern-agent)) |
 
 What the model reads, and when: each tool's description says what its fields
 do; the [base prompt](#the-system-prompt-program), on every request, says how to work
@@ -457,11 +530,11 @@ akern-acp [--until run|settled] [--background hold|send] [--sessions DIR] [-- ak
 |---|---|
 | `initialize` | protocol 1; `loadSession`, images and embedded resources in prompts; no auth methods |
 | `session/new` | `akern -s DIR/ID.jsonl [args]` in the session's `cwd`, answered once `hello` arrives. `models`: the current model, then the others its provider lists with `--models` (asked once per provider, within 10 s), as `PROVIDER/ID`. `configOptions`: `effort`, category `thought_level`, a choice of `default`, `low`, `medium`, `high`. A client-chosen `sessionId` of letters, digits, `-` and `_` is kept. `mcpServers` are ignored, with a line on stderr: akern has no MCP client |
-| `session/load` | replays the file's chain from the head as `user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk`, `tool_call` and `tool_call_update`, then starts `akern` on it, without `AKERN_MODEL`, so it keeps the model it has; answered like `session/new` |
+| `session/load` | replays the context ([akern.md §5](akern.md#session-file)) as `user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk`, `tool_call` and `tool_call_update`, then starts `akern` on it with `-m` and `-P effort=` from the file's last `hello`, so it keeps the model and effort it had; answered like `session/new` |
 | `session/prompt` | `send`: text as text, images as images, a `resource` as `<resource uri="…">` text, a `resource_link` as `@URI` |
-| `session/cancel` | `abort` (jobs keep running); the prompt ends `cancelled` |
-| `session/set_model`, `session/set_config_option` (`model`) | `append` of a `settings` entry with the model |
-| `session/set_config_option` (`effort`) | `append` of a `settings` entry whose `params` are `{"effort": LEVEL}`, or none for `default`; then a `config_option_update` |
+| `session/cancel` | `abort` (jobs keep running), sent at once: the run ends `aborted`, or akern hands the prompt back (`returned`); either way the prompt ends `cancelled`. A prompt already delivered whose run has ended, with only jobs left (`--until settled`), ends `cancelled` at once |
+| `session/set_model`, `session/set_config_option` (`model`) | the session's akern starts again with `-m MODEL` on the same file: at once when it has settled, else once it does (prompts sent meanwhile still use the old model) |
+| `session/set_config_option` (`effort`) | likewise, with `-P effort=LEVEL`, or none for `default`; then a `config_option_update` |
 | a prompt that is only `/model`, `/model ID`, `/effort` or `/effort LEVEL` | answered by `akern-acp` and never sent to the model, for clients with no model or effort control of their own (Omnigent): `/model` lists the provider's models, `/model ID` switches (a bare id stays with the current provider), `/effort` sets the param as the option does, any value the provider takes |
 
 | akern event | ACP `session/update` |
@@ -496,21 +569,21 @@ akern's concurrency shows as it is: `--until` and `--background` do not apply.
 |---|---|
 | `initialize` | protocol 2, `info`, `capabilities.session` with images and embedded resources in prompts; no auth methods |
 | `session/new` | as protocol 1; `configOptions` are `model` (category `model`: the current model and the ones its provider lists) and `effort`; `availableCommands` are `model` and `effort` |
-| `session/resume` | starts `akern` on the file, then a `state_update` (`idle`) and a `session_info_update` with the title. `replayFrom: {"type":"start"}` first replays the chain as whole `user_message`, `agent_message`, `agent_thought` and `tool_call_update`s, each by its entry id, then `replay_complete`. A call the file leaves open is `failed`: the akern that ran it is gone |
+| `session/resume` | starts `akern` on the file, then a `state_update` (`idle`) and a `session_info_update` with the title. `replayFrom: {"type":"start"}` first replays the context, in the kernel's order (a reply where its `turn_start` is), as whole `user_message`, `agent_message`, `agent_thought` and `tool_call_update`s, then `replay_complete`. Each message keeps the id it had live: an assistant message its entry id; a user message one `user_message` per prompt or inject item in its `meta.items`, by the item's id, with that item's blocks (a message without `meta.items`: one, by its entry id). A call the file leaves open is `failed`: the akern that ran it is gone |
 | `session/list` | the files in `--sessions` whose header `cwd` is the one asked for: title from the last `name` entry, else the first prompt's first line; `updatedAt` the file's mtime |
 | `session/close` | `abort` with `jobs`, then stdin closed; answered once `akern` has exited |
-| `session/prompt` | `send`, at any time: answered `{"messageId"}` at its `ok`, then a `user_message`. While a run works it steers it: `when` `turn`, delivered at its next turn. `_meta` `io.github.wrongbad.akern/when` picks another [delivery mode](akern.md#delivery-modes) (`now` preempts the streaming turn) |
-| `session/cancel` | `abort`, of the run and of a prompt not yet taken; jobs keep running. On a child session: `SIGTERM` to the call that runs it |
+| `session/prompt` | `send`, at any time. Answered `{"messageId"}`, the item id its `ok` gave, then a `user_message`, once akern delivers the item (a `message` whose `meta.items` name it): ACP's insertion, so a prompt queued behind running calls or with `when` `idle` is answered later. Handed back by an abort before that (`returned`, or `run_end.items`): answered `-32800`, never inserted. While a run works it steers it: `when` `turn`, delivered at its next turn. `_meta` `io.github.wrongbad.akern/when` picks another [delivery mode](akern.md#delivery-modes) (`now` preempts the streaming turn) |
+| `session/cancel` | `abort` at once, idle or not: akern ends the run and hands back what it has not delivered, which answers those prompts `-32800`; jobs keep running. On a child session: `SIGTERM` to the call that runs it |
 | `tool_call/cancel`, `terminal/cancel` | `SIGTERM` to the call's process group; its result closes it `cancelled` |
 | `session/set_config_option` | `model` or `effort` (`type` `id`), as in protocol 1 |
-| `/model`, `/effort` prompts | as in protocol 1, run from idle to idle, the prompt a live-only `user_message` |
+| `/model`, `/effort` prompts | as in protocol 1, run from idle to idle, the prompt a live-only `user_message` under an id `command-` and 16 hex, which no akern id can be |
 
 | akern event | ACP 2 `session/update` |
 |---|---|
 | `run_start` | `state_update` `running` |
 | `run_end` | `state_update` `idle`, `stopReason` `end_turn`, `cancelled` (aborted, or after a cancel) or `error` with `error.data` the run's error; `_meta` `io.github.wrongbad.akern/usage` the run's usage summed |
 | either | `background`: each call still open from an earlier run (a job), as a `tool_call`, and a `subagent` when it runs one |
-| `text_delta`, `thinking_delta` | `agent_message_chunk`, `agent_thought_chunk`, by a `messageId` for the turn |
+| `text_delta`, `thinking_delta` | `agent_message_chunk`, `agent_thought_chunk`, by the `messageId` `turn_start.id`: the id the turn's assistant entry gets |
 | an assistant `message` | `agent_thought` and `agent_message` with its whole content, by the same id |
 | `tool_start` | `tool_call_update` creating the call, `in_progress`, as in protocol 1. A `shell` call that started is also a terminal: `terminal_update` with its `command` and `cwd`, and `{"type":"terminal"}` content. A call with a process has `capabilities.cancel`. An edit's content is a `diff` with its file in `changes` |
 | `tool_progress` | `terminal_output_chunk`, base64, at most every 0.25 s or past 1 MiB |

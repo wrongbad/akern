@@ -9,11 +9,11 @@ import subprocess
 
 import pytest
 
-from conftest import BUILD, PATIENCE
+from conftest import BUILD, PATIENCE, executable
 
 FAKE = """#!/bin/sh
 case $1 in --models) printf '%s\\n' '{"id":"a","context":5}' '{"id":"b"}'; exit ;; esac
-jq -c '"model " + .model | {type: "text_delta", text: .}, {type: "result", stop: "end_turn",
+head -n 1 | jq -c '"model " + .model | {type: "text_delta", text: .}, {type: "result", stop: "end_turn",
     message: {role: "assistant", content: [{type: "text", text: .}]}}'
 """
 BROKEN = """#!/bin/sh
@@ -34,8 +34,7 @@ def home(tmp_path):
     for layer in (home, home / "system"):
         (layer / "providers" / "mock").symlink_to(BUILD / "system" / "providers" / "mock")
     for name, text in {"fake": FAKE, "broken": BROKEN, "silent": SILENT_FAILURE, "quiet": QUIET}.items():
-        (home / "providers" / name).write_text(text)
-        (home / "providers" / name).chmod(0o755)
+        executable(home / "providers" / name, text)
     return home
 
 

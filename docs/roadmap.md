@@ -29,10 +29,9 @@ session path first, direct appends only to an unowned session.
 
 | Command | Does |
 |---|---|
-| `akern-sessions` | lists sessions: path, name, head, last activity |
-| `akern-fork` | copies a chain to a new file |
-| `akern-tree` | shows the entry tree; appends a `branch` |
-| `akern-compact` | runs the provider for a summary, then appends a new root and the kept copies ([akern.md](akern.md#session-file)) |
+| `akern-sessions` | lists sessions: path, name, last activity |
+| `akern-fork` | shows a session's entries and writes the first lines, up to the one picked, to a new file ([akern.md](akern.md#forks)) |
+| `akern-compact` | runs the provider for a summary, then appends a `reset`, the summary and the kept copies ([akern.md](akern.md#session-file)) |
 | `akern-models` | runs each provider in `$AKERN_HOME/providers` with `--models` |
 | `akern-pkg` | `install`, `remove`, `update`, `list`: programs onto `PATH`, providers and skills into `$AKERN_HOME` |
 
@@ -47,6 +46,12 @@ exports it.
 Compare two or three wordings of placeholders and late results
 (`provider_describe_unanswered`, `provider_describe_job`) on long-running tasks:
 does the model wait, poll in a loop, or forget the job.
+
+### Sandbox and key proxy
+
+Designed in [sandbox.md](sandbox.md), not started: a container per agent run
+and a key proxy outside it, with no kernel change. Its open questions
+([sandbox.md §8](sandbox.md#8-open-questions)) come first.
 
 ### Examples
 
@@ -80,9 +85,8 @@ call.
 Deferred; leave as is for now. Candidates:
 
 - drop the `status` command and event, `queued`, `run_start` and `tool_start`;
-- add `meta` to the `message` event;
-- pair `turn_start` and `turn_end`: today `turn_end` is not sent for a turn
-  that was preempted, aborted or whose provider failed.
+- replay undelivered `queued` items on resume: the file records them, but a
+  resumed kernel starts with an empty inbox.
 
 ### Appending to an owned session
 
@@ -95,6 +99,9 @@ a second UI) get a way in.
 | none: the front end forwards | every writer needs the front end's cooperation |
 | a relay program that owns the kernel's stdin and accepts appends from others | one more process; no kernel change |
 | the kernel accepts `flock`ed appends while it owns the file | it must re-read the tail before each request; it is no longer the sole writer |
+
+Parked with the wider question of several clients driving or watching one
+session: [multi-client.md](multi-client.md). For now a session has one driver.
 
 ### Where settings live
 
@@ -122,7 +129,7 @@ unanswered in the session.
 | Option | Cost |
 |---|---|
 | nothing (today) | the call stays unanswered on resume; providers keep answering it with a placeholder |
-| on open, answer each unanswered call with a late `tool_result` saying it was lost | a session scan at open; the kernel must find unanswered calls in the chain |
+| on open, answer each unanswered call with a late `tool_result` saying it was lost | a session scan at open; the kernel must find unanswered calls in the file |
 | jobs write straight to their files and a restarted kernel tails them, re-adopting survivors | file-based capture for every job, for an uncommon case |
 
 Tools that must outlive the kernel (servers) can daemonize themselves under
@@ -131,7 +138,7 @@ any option.
 ### Orphans after the kernel is killed on macOS
 
 There is no `PR_SET_PDEATHSIG`, so `SIGKILL` of the kernel can leave workers
-running ([proc.h](../akern/proc.h)).
+running ([process.c](../akern/process.c)).
 
 | Option | Cost |
 |---|---|

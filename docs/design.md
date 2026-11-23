@@ -1,8 +1,8 @@
 # Design
 
 Why akern is shaped the way it is. The contracts themselves are in the API
-docs: [akern.md](akern.md) (the process), the headers in `akern/` and `shared/`
-(its modules), [providers.md](providers.md) and [tools.md](tools.md).
+docs: [akern.md](akern.md) (the process), the comment atop each file in `akern/`
+and the headers in `shared/` (its modules), [providers.md](providers.md) and [tools.md](tools.md).
 
 ## What this is
 
@@ -29,7 +29,9 @@ and messages that interrupt a turn are part of the kernel from the start.
   ([pi-parity.md](pi-parity.md)).
 - **Extensions in any language.** A shell script is a first-class extension.
 - **Contracts are stable; implementations are replaceable.** Including the
-  kernel itself.
+  kernel itself. Stability is the goal, not the current state: while the
+  project is pre-alpha, any contract may break at any commit, with no
+  migration.
 
 ## Non-goals
 
@@ -48,7 +50,7 @@ and messages that interrupt a turn are part of the kernel from the start.
 2. **Everything is a process.** Provider, tools, jobs, sub-agents and
    frontends are executables. A crash takes down one call, never the session.
 3. **The conversation is serial; the work is concurrent.** One model request in
-   flight per session, since two requests from one head would fork the
+   flight per session, since two requests from one history would fork the
    conversation. Everything the model launches runs alongside it. Parallelism
    across conversations is more kernels: a sub-agent is another `akern`
    on another session file.
@@ -61,13 +63,18 @@ and messages that interrupt a turn are part of the kernel from the start.
    records only what happened. Interruptions never leave the history invalid.
 6. **One wire format.** UTF-8 JSON lines everywhere. If you can read one
    interface you can read them all.
-7. **The file is the state.** A session is an append-only JSONL file. Model,
-   parameters and queues are the only state the kernel holds outside it.
-   Resume is opening the file; a branch is one appended marker; compaction is
-   a new root. A job's result is logged when it ends, and its output is in its
-   own file meanwhile, so what ran and what still runs is in files.
+7. **The file is the state, and the stream is the file.** A session is an
+   append-only JSONL file holding everything the kernel said on stdout, in
+   order, as said. There is no second account of a session to fall out of step with the
+   first: a front end that reads stdout and one that tails the file see the
+   same lines. Resume is opening the file; a fork is its first lines;
+   compaction is a `reset` marker and a summary. A job's result is logged when
+   it ends, and its output is in its own file meanwhile, so what ran and what
+   still runs is in files. The inbox is the one exception: queued items are
+   recorded (`queued`) but a resume does not queue them again.
 8. **Slice, don't parse.** The kernel treats messages as opaque byte spans and
-   never re-serializes them. What a provider emits is stored and sent back
+   never re-serializes them. Coalescing joins the strings of display deltas
+   (`text_delta`, `tool_progress`), which no request is built from. What a provider emits is stored and sent back
    byte-for-byte, and new messages only ever go at the tail. This keeps prompt
    caches warm and provider-specific fields (thinking signatures, cache
    markers) intact for free.
@@ -142,12 +149,68 @@ tmux; a separate relay program could add it later without kernel changes), and
 programs other than the front end appending to an owned session (an open item;
 see [roadmap.md](roadmap.md#appending-to-an-owned-session)).
 
-What the kernel knows: commands and events, a session's parent chain, the
-`tool_use` blocks of an assistant message, which block a provider says the API
-rejected, child processes, files and a job's stdin, and the order of
+What the kernel knows: commands and lines, a session's messages after its
+last `reset`, the `tool_use` blocks of an assistant message, which block a
+provider says the API rejected, child processes, files and a job's stdin, and the order of
 deliveries. What it does not know: HTTP, TLS, any
 provider's API, any program's semantics, markdown, terminals, `AGENTS.md`,
 skills, compaction, permissions, config files.
+
+## One stream, five actors
+
+Inside, the kernel has the shape it shows outside: one stream of lines, with
+programs reacting to it. Every line goes through one queue, the bus, and is
+handed out in order to stdout, to the session file and to five actors, one
+file each, as in a shell pipeline of filters. An
+actor does something only when a line reaches it, and talks to the others only
+by putting lines on the bus; no module calls into another's state. Orders
+between actors are *told* lines: they go to the actors only, never to stdout
+or the file, so the protocol does not change when the wiring does.
+
+| Actor | Reacts to | Puts on the bus |
+|---|---|---|
+| loop | `exit`: stops reading stdin and every process, and returns once none is left | for a signal: `interrupt` and an abort, or `exit` |
+| input | stdin; `status`, answered in its place among the commands | told: each command, `eof` |
+| tools | a reply that asks for tools: runs them; the message that answers the turn: the rest become jobs; `abort`: kills; `due`: a wait ran out | `tool_start`, `tool_progress`, `block`; told: `released`, `due` (a timer) |
+| model | `continue`: starts a turn; `preempt`, `abort`: stops the provider and seals the partial reply; its own `replace`: retries | `turn_start`, deltas, the reply, `replace`, `turn_end` |
+| inbox | send, abort and append, the turn's lines, `block`, `released`, `eof`, `exit`, `close` | user messages, `run_start`, `run_end`, `pending`, `preempt`, `abort`, `returned`, held entries, replies, `settled`; told: `continue`, `exit` |
+
+The inbox is the sequencer: it alone decides what happens next, when queued
+items and call results go into the conversation, when the model talks
+(`continue`), what an abort stops, and when the kernel is done (`exit`). The
+others are servants: the model starts a turn because it is told to, not
+because it guessed from a user message. A line put while lines are handed out
+waits its turn, so no reaction runs inside another, and each actor's state
+changes at once with what it says, so it never says it twice. Processes, timers
+and signals are just more sources of lines. The main loop is the whole
+kernel:
+
+```c
+for (;;) {
+    bus_drain(bus);      /* each line: stdout, session, then each actor */
+    if (stopping && no processes)
+        return exit_code;
+    wait_for_io(loop);   /* stdin, processes, signals, timers: lines onto the bus */
+}
+```
+
+Each file opens with what it owns; `akern.h` is what they share, and lists
+the told lines:
+
+| File | |
+|---|---|
+| `akern.h` | the shared types and the bus, loop and process calls |
+| `main.c` | arguments, wiring, the first lines |
+| `bus.c` | the queue, timers, stdout, the session file |
+| `loop.c` | poll, signals, timers' clock, the exit line |
+| `process.c` | child processes: providers and tool programs |
+| `input.c`, `tools.c`, `model.c`, `inbox.c` | the actors |
+
+Why: the order of the conversation is the order of the stream. A message that
+cuts into a reply lands in the file after the reply began, and the reply sits
+in the context where it began, so neither the file nor the request ever needs
+rewriting. And with no second path to the file, stdout and the session cannot
+disagree.
 
 ## Programs and home
 
@@ -177,8 +240,8 @@ that for this repository.
 | Permission gates, path protection, sandboxing | an OS sandbox around the whole kernel, or a shim on `PATH` |
 | Which calls go to the background | the model (`"wait": false` on the call) |
 | Output redaction, summarizing | a shim on `PATH` (the size cap is `shell`'s `output_limit`) |
-| Compaction, fork, tree, export, session listing | commands (`akern-*`) |
-| Sub-agents | another `akern -p`, run through `shell`; the kernel only counts down `AKERN_RE_LIMIT` |
+| Compaction, fork, export, session listing | commands (`akern-*`) |
+| Sub-agents | another `akern -p`, or any ACP agent through `akern-agent`, run through `shell`; the kernel only counts down `AKERN_RE_LIMIT` |
 | Job control for the model | the provider's placeholder, naming the job and its file; `tail` through `shell`; `job` for input, end of input, signals and waiting; or end the turn |
 | Steering | a person types into the terminal; a parent sends a line to its sub-agent with `job` |
 | Shells, file editing, state between calls | the model, using whatever is installed |
@@ -194,16 +257,16 @@ a result. Interception is built in user space, at the seams it already has.
 | Seam | How |
 |---|---|
 | Provider | wrap or replace `$AKERN_HOME/providers/<name>`: change the request on stdin, `exec` the real provider, or filter its output |
-| Tools | every call runs the program its tool's `program` in `tools.json` names (`bash -c COMMAND`, `akern-edit PATH …`), looked up on `PATH`, and the shell looks up each program it runs on `PATH` in turn, so a shim earlier on `PATH` wraps a whole tool or any one program: check, rewrite, log, redact. Your own `tools.json` can also point a tool at another program ([tools.md](tools.md#1-built-in-tools)) |
-| Front end | a program that writes the kernel's stdin commands and reads its stdout events |
+| Tools | every call runs the program its tool's `program` in `tools.json` names (`akern-shell -c COMMAND`, `akern-edit PATH …`), looked up on `PATH`, and the shell looks up each program it runs on `PATH` in turn, so a shim earlier on `PATH` wraps a whole tool or any one program: check, rewrite, log, redact. Your own `tools.json` can also point a tool at another program ([tools.md](tools.md#1-built-in-tools)) |
+| Front end | a program that writes the kernel's stdin commands and reads its stdout lines |
 
 | Pi hook point | Here |
 |---|---|
 | `input` | the front end rewrites a prompt before it sends it |
-| `request` | a wrapping provider; the system prompt is the system-prompt program's output, recorded in the session as a `settings` entry and changed by appending another |
+| `request` | a wrapping provider; the system prompt is the system-prompt program's output at each start, or `-S` |
 | `tool_call` | a shim on `PATH`; an OS sandbox around the whole kernel |
 | `tool_result` | a shim on `PATH` that filters its program's output |
-| `turn_end` | the front end, on the `turn_end` event: logging, checkpoints |
+| `turn_end` | the front end, on the `turn_end` line: logging, checkpoints |
 | `idle` | the front end, on `run_end`: `send` to continue or retry |
 
 A wrapper named as the shell tool's `program` sees every `shell` call's
@@ -211,6 +274,33 @@ command (a shim of `bash` on `PATH` would too, but also every other bash on
 the machine), but not what the commands go on to do (a script's file access,
 a program run by absolute path). Confine the whole kernel in an OS
 sandbox (a container, `bwrap`, `sandbox-exec`), as pi does, for that.
+
+## No named pipes
+
+A job's stdin, a sub-agent's included, is an anonymous pipe whose write end
+only its parent kernel holds. Input reaches it through the parent (`job`, or a
+front end's line on the kernel's stdin), never through a FIFO or socket path
+that other processes open. A path would bring two problems the tree does not
+have:
+
+- **Cleanup.** A FIFO is a file. Someone has to create it, pick a name that
+  does not collide, and remove it when the job ends, including after a kernel
+  killed with `SIGKILL` that never got to clean up. A stale one misleads the
+  next process that finds it. An anonymous pipe is gone when the last process
+  holding it is, and "kill everything it started" already covers that.
+- **More than one writer.** Anyone who can open the path can write to it.
+  Writes larger than `PIPE_BUF` are not atomic, so two writers can interleave
+  in the middle of a line, and avoiding that means locks, framing and handling
+  for half-written input. The reader also sees EOF whenever the last writer
+  closes, so the job's input ends between two writers unless something keeps
+  the FIFO open.
+
+In the tree, each child has exactly one writer: its parent. Everything sent to
+a child goes into one queue in the parent, in order, so there is nothing to
+lock and nothing to remove. Anyone else who wants to reach a child, such as a
+person, a sibling or a grandparent, goes through its parent. The cost is that
+you cannot steer a job from another terminal on the side; run the kernel
+under tmux, or send it through the front end that owns the kernel.
 
 ## What this design costs
 
@@ -253,6 +343,8 @@ run any tool with your privileges. Safety is composed:
   what a program does once it runs. It needs no
   kernel change: the front end starts `akern` inside the container
   (`docker run -i …`), and the pipes cross the boundary like any other.
+  API keys then stay outside it, in a key proxy that gives each container a
+  token of its own ([sandbox.md](sandbox.md), a design not yet built).
 
 Only the process that started a kernel can drive it: there is no listening
 endpoint. A job's stdin pipe is anonymous: only the kernel holds its write

@@ -4,7 +4,7 @@ import shlex
 
 import pytest
 
-from conftest import parallel, tool
+from conftest import executable, parallel, tool
 
 TINY_PNG = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x02\0\0\0\x03\x08\x02\0\0\0"
 
@@ -43,7 +43,8 @@ def test_stderr_before_an_image_makes_it_binary_output_not_shown(kernel, tmp_pat
     image = tmp_path / "image"
     image.write_bytes(TINY_PNG)
     run = kernel(tool("shell", command=f"echo note >&2 && cat {shlex.quote(str(image))}"))
-    assert run.result_text == f"[exit 0; {len(TINY_PNG) + 5} bytes of binary output not shown]"
+    out = f"{run.session}.d/calls/{run.calls[0]}.out"
+    assert run.result_text == f"[exit 0; {len(TINY_PNG) + 5} bytes of binary output not shown, all of it in {out}]"
 
 
 def test_stderr_sent_elsewhere_keeps_the_image(kernel, tmp_path):
@@ -62,7 +63,8 @@ def test_an_image_from_a_failed_program_is_not_shown(kernel, tmp_path):
     image = tmp_path / "image"
     image.write_bytes(TINY_PNG)
     run = kernel(tool("shell", command=f"cat {shlex.quote(str(image))} && exit 1"))
-    assert run.result_text == f"[exit 1; {len(TINY_PNG)} bytes of image/png not shown]"
+    out = f"{run.session}.d/calls/{run.calls[0]}.out"
+    assert run.result_text == f"[exit 1; {len(TINY_PNG)} bytes of image/png not shown, all of it in {out}]"
     assert run.tool_results[0]["is_error"] is True
 
 
@@ -91,17 +93,15 @@ def test_a_shim_on_path_sees_every_call_and_can_refuse_one(kernel, tmp_path):
     shims, log = tmp_path / "shims", tmp_path / "calls.log"
     shims.mkdir()
     for name in ("bash", "akern-edit"):
-        shim = shims / name
-        shim.write_text(f"""#!/bin/sh
-echo "{name} $*" >> '{log}'
+        executable(shims / name, f"""#!/bin/sh
+echo "{name} $*" >> "$SHIM_LOG"
 case "$1" in *secret*) echo "{name}: $1: refused" >&2; exit 1;; esac
 PATH="${{PATH#*:}}" exec {name} "$@"
 """)
-        shim.chmod(0o755)
     secret = tmp_path / "secret.txt"
     secret.write_text("hush\n")
     run = kernel(parallel(tool("shell", command="echo ok"), tool("edit", path=str(secret), old="hush", new="shout")),
-                 env={"PATH": f"{shims}:{kernel.env['PATH']}"})
+                 env={"PATH": f"{shims}:{kernel.env['PATH']}", "SHIM_LOG": str(log)})
     assert run.result_texts[0] == "[exit 0]\nok\n"
     assert run.result_texts[1] == f"akern-edit: {secret}: refused"
     assert secret.read_text() == "hush\n"
@@ -116,14 +116,12 @@ def test_the_tools_sent_are_tools_json_from_akern_home_compacted_without_their_c
 
 
 def test_a_command_of_your_own_runs_in_place_of_the_shipped_program(kernel, home, tmp_path):
-    wrapper = tmp_path / "wrapped"
-    wrapper.write_text('#!/bin/sh\necho "wrapped $*" >&2\nexec bash "$@"\n')
-    wrapper.chmod(0o755)
+    wrapper = executable(tmp_path / "wrapped", '#!/bin/sh\necho "wrapped $*" >&2\nexec bash "$@"\n')
     tools = json.loads((home.dir / "system" / "tools.json").read_text())
     tools[0]["program"] = str(wrapper)
     (home.dir / "tools.json").write_text(json.dumps(tools))
     run = kernel(tool("shell", command="echo hi"), env=home.env)
-    assert run.result_text == "[exit 0]\nwrapped -c echo hi\nhi\n"
+    assert run.result_text == "wrapped -c echo hi\nhi\n"
 
 
 def test_a_tool_the_kernel_cannot_run_stops_akern_at_startup(kernel, home):

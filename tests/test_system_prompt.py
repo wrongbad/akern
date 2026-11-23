@@ -28,9 +28,10 @@ def test_user_skills_come_first_and_the_header_ends_at_the_second_rule(kernel, h
     mine.parent.mkdir(parents=True)
     mine.write_text("---\nname: my-zz\ndescription: mine\n---\n\nname: not the header\n")
     kernel("hi", env=home.env)
-    akern = home.dir / "system" / "skills" / "akern" / "SKILL.md"
+    acp, akern = (home.dir / "system" / "skills" / name / "SKILL.md" for name in ("acp", "akern"))
     assert home.requests[0]["system"] == (BASE + "\n" + here(kernel.dir) + "\nSkills: read a skill's file before relying on it.\n"
                                           f"- my-zz: mine ({mine})\n"
+                                          f"- acp: {description(acp)} ({acp})\n"
                                           f"- akern: {description(akern)} ({akern})\n")
 
 
@@ -39,8 +40,10 @@ def test_a_user_skill_hides_the_built_in_of_the_same_name(kernel, home):
     mine.parent.mkdir(parents=True)
     mine.write_text("---\nname: my-akern\ndescription: mine\n---\n")
     kernel("hi", env=home.env)
+    acp = home.dir / "system" / "skills" / "acp" / "SKILL.md"
     assert home.requests[0]["system"] == (BASE + "\n" + here(kernel.dir) +
-                                          f"\nSkills: read a skill's file before relying on it.\n- my-akern: mine ({mine})\n")
+                                          f"\nSkills: read a skill's file before relying on it.\n- my-akern: mine ({mine})\n"
+                                          f"- acp: {description(acp)} ({acp})\n")
 
 
 def test_system_md_then_skills_then_context_files_from_the_repository_root_down_to_the_working_directory(
@@ -57,7 +60,7 @@ def test_system_md_then_skills_then_context_files_from_the_repository_root_down_
     (home.dir / "system.md").write_text("mine\n")
     Kernel(cwd, akern_env)("hi", env=home.env)
     system = home.requests[0]["system"]
-    assert system.startswith(BASE + "\n" + here(cwd, repo) + "\nmine\n\nSkills: read a skill's file before relying on it.\n- akern: ")
+    assert system.startswith(BASE + "\n" + here(cwd, repo) + "\nmine\n\nSkills: read a skill's file before relying on it.\n- acp: ")
     assert system.endswith(f")\n\n# {repo}/AGENTS.md\n\nroot\n\n# {repo}/a/CLAUDE.md\n\nmiddle\n\n"
                            f"# {cwd}/AGENTS.md\n\nhere\n")
     assert "outside" not in system and "hidden" not in system

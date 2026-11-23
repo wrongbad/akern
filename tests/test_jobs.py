@@ -158,7 +158,7 @@ def test_each_result_is_announced_as_a_block_as_its_call_ends_before_the_message
                  during=lambda run: wait_for(lambda: run.events_of("block")) and gate.write_text("released\n"))
     first, second = run.events_of("block")
     assert first["block"]["tool_use_id"] == run.calls[0]
-    [results] = [m for m in run.events_of("message") if m["source"] == "results"]
+    [results] = [m for m in run.events_of("message") if m["meta"]["source"] == "results"]
     assert results["message"]["content"] == [first["block"], second["block"]]
 
 

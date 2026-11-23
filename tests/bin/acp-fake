@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""A scripted ACP protocol 2 agent, for what akern-acp never does: ask permission, fail, die, log
+to stdout, keep background work after going idle.
+
+Logs every line it reads to $FAKE_ACP_LOG when set. Keeps each session's turn count and model in
+.fake-acp/<id>.json under its cwd, so a session resumes in a new process. $FAKE_ACP_VERSION is the
+protocol version it answers (default: the one asked for, at most 2).
+
+A prompt's text picks what it does:
+  ask        asks permission to run `rm -rf build`; says "allowed" or "refused"
+  fail       ends its work with stopReason error, "it broke"
+  die        exits 3 in the middle of its work
+  noisy      writes a line that is not JSON on stdout first
+  background answers, goes idle with a terminal in the background, then ends it 0.3 s later
+  slow       works until cancelled
+  anything else: "fake[MODEL] turn N: TEXT", in two chunks
+"""
+import json
+import os
+import select
+import sys
+import time
+
+LOG = os.environ.get("FAKE_ACP_LOG")
+cancelled = set()
+next_id = 0
+message_n = 0
+unread = b""
+
+
+def out(message):
+    sys.stdout.write(json.dumps(message) + "\n")
+    sys.stdout.flush()
+
+
+def update(session, update):
+    out({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session, "update": update}})
+
+
+def state(session, state, **fields):
+    update(session, {"sessionUpdate": "state_update", "state": state, **fields})
+
+
+def read(timeout=None):
+    """The next line, as JSON; None after `timeout` seconds; exits at EOF. Reads the fd itself, as
+    select() cannot see lines that sys.stdin has buffered already."""
+    global unread
+    while b"\n" not in unread:
+        if timeout is not None and not select.select([0], [], [], timeout)[0]:
+            return None
+        chunk = os.read(0, 65536)
+        if not chunk:
+            if not unread:
+                sys.exit(0)
+            unread += b"\n"
+        unread += chunk
+    line, _, unread = unread.partition(b"\n")
+    line = line.decode() + "\n"
+    if LOG:
+        with open(LOG, "a") as f:
+            f.write(line)
+    message = json.loads(line)
+    if message.get("method") == "session/cancel":
+        cancelled.add(message["params"]["sessionId"])
+    return message
+
+
+def store(cwd, session):
+    return os.path.join(cwd, ".fake-acp", session + ".json")
+
+
+def load(cwd, session):
+    with open(store(cwd, session)) as f:
+        return json.load(f)
+
+
+def save(cwd, session, data):
+    os.makedirs(os.path.dirname(store(cwd, session)), exist_ok=True)
+    with open(store(cwd, session), "w") as f:
+        json.dump(data, f)
+
+
+def options(data):
+    return [
+        {"configId": "model", "name": "Model", "category": "model", "type": "select",
+         "currentValue": data["model"],
+         "options": [{"value": "small", "name": "Small"}, {"value": "big-1", "name": "Big"}]},
+        {"configId": "fast", "name": "Fast", "type": "boolean", "currentValue": data["fast"]},
+    ]
+
+
+def say(session, text):
+    global message_n
+    message_n += 1
+    mid = f"m{message_n}"
+    half = len(text) // 2
+    for part in (text[:half], text[half:]):
+        update(session, {"sessionUpdate": "agent_message_chunk", "messageId": mid,
+                         "content": {"type": "text", "text": part}})
+
+
+def ask(session, cwd):
+    global next_id
+    next_id += 1
+    out({"jsonrpc": "2.0", "id": next_id, "method": "session/request_permission", "params": {
+        "sessionId": session, "title": "Run this?",
+        "subject": {"type": "command", "command": "rm -rf build", "cwd": cwd},
+        "options": [{"optionId": "yes", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "no", "name": "Reject", "kind": "reject_once"}]}})
+    while (answer := read()).get("id") != next_id:
+        pass
+    outcome = answer["result"]["outcome"]
+    if outcome.get("optionId") == "yes":
+        say(session, "allowed")
+        return "end_turn"
+    say(session, "refused")
+    deadline = time.monotonic() + 2
+    while session not in cancelled and read(max(0, deadline - time.monotonic())) is not None:
+        pass
+    return "cancelled" if session in cancelled else "end_turn"
+
+
+def prompt(message, cwds):
+    params = message["params"]
+    session, text = params["sessionId"], params["prompt"][0]["text"]
+    cwd = cwds[session]
+    data = load(cwd, session)
+    data["turns"] += 1
+    save(cwd, session, data)
+    cancelled.discard(session)
+    out({"jsonrpc": "2.0", "id": message["id"], "result": {"messageId": f"u{data['turns']}"}})
+    state(session, "running")
+    if text == "noisy":
+        sys.stdout.write("starting up...\n")
+    if text == "ask":
+        state(session, "idle", stopReason=ask(session, cwd), background=[])
+    elif text == "fail":
+        state(session, "idle", stopReason="error", error={"code": -32603, "message": "it broke"}, background=[])
+    elif text == "die":
+        sys.stderr.write("fake: dying\n")
+        sys.exit(3)
+    elif text == "background":
+        update(session, {"sessionUpdate": "terminal_update", "terminalId": "t1", "command": "sleep"})
+        say(session, "started it")
+        state(session, "idle", stopReason="end_turn", background=[{"type": "terminal", "terminalId": "t1"}])
+        time.sleep(0.3)
+        update(session, {"sessionUpdate": "terminal_update", "terminalId": "t1", "exitStatus": {"exitCode": 0}})
+        state(session, "idle", stopReason="end_turn", background=[])
+    elif text == "slow":
+        while session not in cancelled:
+            read(0.05)
+        say(session, "stopped")
+        state(session, "idle", stopReason="cancelled", background=[])
+    else:
+        say(session, f"fake[{data['model']}] turn {data['turns']}: {text}")
+        state(session, "idle", stopReason="end_turn", background=[])
+
+
+def main():
+    cwds = {}
+    while True:
+        message = read()
+        method, params, id = message.get("method"), message.get("params", {}), message.get("id")
+        if method == "initialize":
+            version = int(os.environ.get("FAKE_ACP_VERSION", min(params["protocolVersion"], 2)))
+            out({"jsonrpc": "2.0", "id": id, "result": {
+                "protocolVersion": version, "info": {"name": "acp-fake", "version": "0"},
+                "capabilities": {"session": {}}, "authMethods": []}})
+        elif method == "session/new":
+            session = f"fake-{os.getpid()}-{len(cwds)}"
+            cwds[session] = params["cwd"]
+            save(params["cwd"], session, {"turns": 0, "model": "small", "fast": False})
+            out({"jsonrpc": "2.0", "id": id, "result": {
+                "sessionId": session, "configOptions": options(load(params["cwd"], session))}})
+        elif method == "session/resume":
+            session = params["sessionId"]
+            if not os.path.exists(store(params["cwd"], session)):
+                out({"jsonrpc": "2.0", "id": id, "error": {
+                    "code": -32002, "message": "no such session", "data": {"sessionId": session}}})
+                continue
+            cwds[session] = params["cwd"]
+            state(session, "idle", background=[])
+            out({"jsonrpc": "2.0", "id": id, "result": {"configOptions": options(load(params["cwd"], session))}})
+        elif method == "session/set_config_option":
+            session = params["sessionId"]
+            data = load(cwds[session], session)
+            data[params["configId"]] = params["value"]
+            save(cwds[session], session, data)
+            out({"jsonrpc": "2.0", "id": id, "result": {"configOptions": options(data)}})
+        elif method == "session/prompt":
+            prompt(message, cwds)
+        elif id is not None and method:
+            out({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "not found"}})
+
+
+main()

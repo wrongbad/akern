@@ -1,4 +1,13 @@
-#include "loop.h"
+/* loop: the one poll loop all I/O waits in, and the kernel's lifetime. Each round hands out the
+   bus, then waits: on stdin, stdout, every process's pipes, the signal self-pipe, and the earliest
+   timer or kill deadline; what is ready puts its lines on the bus. Owns signals (a SIGINT is an
+   interrupt line and an abort, a second one within 3 s or SIGTERM/SIGHUP an exit), and, as an
+   actor, the exit line: from then on it reads no stdin, stops every process, and returns once
+   none is left. Holds no conversation state; when the kernel is done is the inbox's. Also the
+   clocks every timeout and timestamp is read from.
+   Modules that wait on a descriptor add it to the poll set the loop lends them each round. */
+
+#include "akern.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -9,20 +18,41 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "calls.h"
-#include "input.h"
-#include "output.h"
-#include "proc.h"
-#include "session.h"
-#include "turns.h"
-
 enum {
     EXIT_INTERRUPTED = 130,
     DOUBLE_SIGINT_SECONDS = 3,
     MAX_POLL_MS = 60000,
 };
 
+typedef struct handler {
+    ready_fn fn;
+    void *ctx;
+} handler;
+
 static int signal_write_fd = -1;
+
+void lines_feed(lines *l, span bytes, bool eof, void (*fn)(void *ctx, span line), void *ctx)
+{
+    buf_putspan(&l->pending, bytes);
+    size_t start = 0;
+    for (char *nl; (nl = memchr(l->pending.p + l->searched, '\n', l->pending.n - l->searched));)
+    {
+        size_t end = (size_t)(nl - l->pending.p);
+        if (!l->skipping)
+            fn(ctx, (span){l->pending.p + start, end - start});
+        l->skipping = false;
+        start = l->searched = end + 1;
+    }
+    buf_drop_front(&l->pending, start);
+    l->searched = l->pending.n; /* no newline before here: never searched again */
+    if ((eof && l->pending.n) || l->pending.n > MAX_LINE_BYTES)
+    {
+        if (!l->skipping)
+            fn(ctx, buf_span(&l->pending));
+        l->skipping = !eof;
+        l->pending.n = l->searched = 0;
+    }
+}
 
 void watch_once(poll_set *set, int fd, short events, ready_fn fn, void *ctx)
 {
@@ -36,25 +66,20 @@ void watch_once(poll_set *set, int fd, short events, ready_fn fn, void *ctx)
     set->handlers[set->n++] = (handler){fn, ctx};
 }
 
-void shutdown_kernel(loop *l, int exit_code)
+static void exit_kernel(loop *l, int exit_code)
 {
-    if (l->stopping)
-        return;
-    l->stopping = true;
-    l->exit_code = exit_code;
-    turns_stop(l->turns);
-    proc_term_all(l->procs);
+    bus_tellf(l->bus, "{'type':'exit','code':%d}", exit_code);
 }
 
 static void on_sigint(loop *l)
 {
     double now = get_monotonic_seconds();
     if (l->stopping || now - l->last_sigint_at < DOUBLE_SIGINT_SECONDS)
-        shutdown_kernel(l, EXIT_INTERRUPTED);
+        exit_kernel(l, EXIT_INTERRUPTED);
     else
     {
-        output_emit(l->output, "{'type':'interrupt','quit_within':%d}", DOUBLE_SIGINT_SECONDS);
-        turns_abort(l->turns, KEEP_JOBS);
+        bus_printf(l->bus, "{'type':'interrupt','quit_within':%d}", DOUBLE_SIGINT_SECONDS);
+        bus_tellf(l->bus, "{'type':'command','command':{'type':'abort','jobs':false}}");
     }
     l->last_sigint_at = now;
 }
@@ -70,7 +95,7 @@ static void on_signal(void *ctx, int fd, short revents)
         if (sigs[i] == SIGINT)
             on_sigint(l);
         else if (sigs[i] == SIGTERM || sigs[i] == SIGHUP)
-            shutdown_kernel(l, EXIT_INTERRUPTED);
+            exit_kernel(l, EXIT_INTERRUPTED);
     }
 }
 
@@ -104,23 +129,23 @@ void loop_open(loop *l)
 
 static int poll_timeout_ms(loop *l)
 {
-    double deadline =
-        earliest_deadline(proc_get_next_kill_at(l->procs), calls_get_next_deadline(l->calls));
+    double deadline = earliest_deadline(proc_next_kill_at(l->processes), bus_next_timer(l->bus));
     if (!deadline)
         return -1;
     double ms = ceil((deadline - get_monotonic_seconds()) * 1000);
     return ms < 0 ? 0 : ms > MAX_POLL_MS ? MAX_POLL_MS : (int)ms;
 }
 
+/* One wait: whatever is ready, timers due and processes done put their lines on the bus. */
 static void wait_for_io(loop *l)
 {
     poll_set *set = &l->watched;
     set->n = 0;
     watch_once(set, l->signal_fd, POLLIN, on_signal, l);
-    output_watch(l->output, set);
+    bus_watch(l->bus, set);
     if (!l->stopping)
         input_watch(l->input, set);
-    proc_watch(l->procs, set, output_is_backlogged(l->output));
+    proc_watch(l->processes, set, bus_is_backlogged(l->bus));
 
     if (poll(set->fds, (nfds_t)set->n, poll_timeout_ms(l)) < 0 && errno != EINTR)
         die("poll: %s", strerror(errno));
@@ -128,56 +153,30 @@ static void wait_for_io(loop *l)
         if (set->fds[i].revents)
             set->handlers[i].fn(set->handlers[i].ctx, set->fds[i].fd, set->fds[i].revents);
 
-    proc_reap(l->procs);
-    proc_escalate_kills(l->procs, get_monotonic_seconds());
-}
-
-static void advance(loop *l)
-{
-    for (bool moved = true; moved;)
-    {
-        moved = proc_deliver_exits(l->procs);
-        if (!l->stopping && session_has_failed(l->session))
-        {
-            output_emit_error(l->output, "kernel", S("session append failed; stopping"));
-            shutdown_kernel(l, 1);
-        }
-        if (l->stopping)
-            continue;
-        moved |= calls_advance(l->calls);
-        moved |= turns_advance(l->turns);
-    }
-}
-
-static bool finished(loop *l)
-{
-    return turns_is_quiescent(l->turns) &&
-           (input_has_ended(l->input) || (l->config->print_answers && turns_has_run(l->turns)));
-}
-
-/* A settled event each time the kernel becomes quiescent after working. */
-static void note_settling(loop *l)
-{
-    bool settled = turns_is_quiescent(l->turns);
-    if (settled && !l->settled && !l->stopping)
-        output_emit(l->output, "{'type':'settled','run':%d}", turns_get_run(l->turns));
-    l->settled = settled;
+    double now = get_monotonic_seconds();
+    proc_settle(l->processes, now);
+    bus_fire_timers(l->bus, now);
 }
 
 int loop_run(loop *l)
 {
-    l->settled = true;
-    advance(l);
-    note_settling(l);
-    while (!(l->stopping && proc_count(l->procs) == 0))
+    for (;;)
     {
+        bus_drain(l->bus);
+        if (l->stopping && l->processes->n == 0)
+            return l->exit_code;
         wait_for_io(l);
-        advance(l);
-        note_settling(l);
-        if (!l->stopping && finished(l))
-            shutdown_kernel(l, turns_get_exit_code(l->turns));
     }
-    return l->exit_code;
+}
+
+void loop_on_line(void *ctx, json line)
+{
+    loop *l = ctx;
+    if (!json_eq(json_get(line, "type"), "exit") || l->stopping)
+        return;
+    l->stopping = true;
+    l->exit_code = (int)json_get_num(json_get(line, "code"), 0);
+    proc_term_all(l->processes);
 }
 
 double get_monotonic_seconds(void)

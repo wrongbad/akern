@@ -41,7 +41,8 @@ def test_a_command_with_no_output_gets_the_header_alone(kernel):
 
 def test_output_that_is_not_text_is_not_shown(kernel):
     run = kernel(tool("shell", command="printf 'a\\0b' && exit 1"))
-    assert run.result_text == "[exit 1; 3 bytes of binary output not shown]"
+    out = f"{run.session}.d/calls/{run.calls[0]}.out"
+    assert run.result_text == f"[exit 1; 3 bytes of binary output not shown, all of it in {out}]"
 
 
 def test_text_with_a_few_bytes_outside_utf8_is_shown(kernel):

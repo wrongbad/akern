@@ -11,15 +11,17 @@ fields ignored, `x-` names): [akern.md](akern.md#conventions).
 |---|---|
 | name | `-m provider/model` (or `AKERN_MODEL`, or a `settings` entry): the part before the first `/` is the provider, the rest the request's `model` (`""` when there is no `/`) |
 | lookup | `$AKERN_HOME/providers/<provider>`, then `$AKERN_HOME/system/providers/<provider>`; the first which must be executable. A name starting with `.` is never run. Not found: `error` `{"where":"provider","message":"no provider for <model> in <home>/providers or <home>/system/providers"}` and the run ends `error` |
-| spawn | once per turn, with no arguments, in its own process group, in the kernel's working directory; environment as for every child ([akern.md §1](akern.md#set-for-children)) |
-| stdin | the request (§2), then EOF |
-| stdout | events and one terminal line (§3); each valid line other than `result` is forwarded to the kernel's stdout as written |
+| spawn | for a turn when no provider stayed after the last one (below), with no arguments, in its own process group, in the kernel's working directory; environment as for every child ([akern.md §1](akern.md#set-for-children)) |
+| stdin | the request (§2) as one line. A provider reads that line, not up to EOF: stdin stays open while the provider runs |
+| stdout | events and one terminal line per request (§3); each valid line other than `result` is forwarded to the kernel's stdout as written |
+| staying | a `result` with `stay: true` ends the turn at once, and the provider stays: the next request, for a provider of the same name, is the next line of its stdin. One that answers it with nothing before it exits is replaced, once, by a new one given the same request. A kernel that switches to another provider closes the stayed one's stdin, and at shutdown it is stopped like every child. Without `stay`, the turn ends when the provider exits |
 | stderr | each line becomes a `notice` event with `source: provider` |
 | `--models` | run by hand or by front ends, not by the kernel: one line per model, `{"id":"…","context":1000000,"max_output":128000}`; `context` and `max_output` are left out when unknown. A provider that cannot be used (no key, no binary) prints an `error` line (§4) instead and exits non-zero, so exit 0 means ready |
 
 Providers are kept off `PATH` on purpose ([design.md](design.md#programs-and-home)).
-A provider is a filter, so providers compose: a wrapper can change the request
-and `exec` another provider, or filter its output.
+A provider is a filter, so providers compose: a wrapper can read the request
+line, change it and pipe it into another provider, or filter its output. A
+provider behind such a pipe sees EOF after one request, so it cannot stay.
 
 ## 2. Request
 
@@ -39,14 +41,14 @@ One JSON object on stdin:
 | `model` | string; the part of `provider/model` after the `/` |
 | `session` | the session's path, as given to `-s`; a call's output file is `<session>.d/calls/<call>.out` ([akern.md §5](akern.md#layout)), which placeholders name |
 | `system` | the system text in effect ([akern.md](akern.md#settings)); `null` when empty |
-| `messages` | the context: the `message` of each `message` entry from the session's head back to a root, oldest first ([akern.md §5](akern.md#session-file)); shape in §5 |
+| `messages` | the context, oldest first ([akern.md §5](akern.md#session-file)); shape in §5 |
 | `tools` | the tool definitions from `tools.json`, `{name, description, input_schema}`, compacted to one line ([tools.md §1](tools.md#1-built-in-tools)) |
 | `params` | object, the params in effect, from `-P` or a `settings` entry ([akern.md](akern.md#settings)); the provider defines its keys and ignores the rest |
 
 ## 3. Output
 
-JSON lines on stdout: zero or more events, then exactly one terminal line,
-`result` or `error`.
+JSON lines on stdout, for each request: zero or more events, then exactly one
+terminal line, `result` or `error`.
 
 ```json
 {"type":"text_delta","text":"I'll "}
@@ -63,7 +65,8 @@ JSON lines on stdout: zero or more events, then exactly one terminal line,
 | `thinking_delta` | `text` | forwarded; display only |
 | `tool_use_start` | `id`, `name` | forwarded; display only |
 | `tool_use_delta` | `id`, `json` (a fragment of the input text) | forwarded; display only |
-| `x-*`, any other type | | forwarded |
+| `x-*` | | forwarded |
+| any other type | | dropped: it would be a line of the session ([akern.md §4](akern.md#provider-events)) |
 | `result` | `stop`, `message`, `usage` | not forwarded; the only line the kernel parses. The last one written wins |
 | `error` | `kind`, `message`, `status`; `at` for `invalid_block` | forwarded, and becomes `run_end.error` (§4), unless the kernel omits the block it names |
 
@@ -72,6 +75,7 @@ JSON lines on stdout: zero or more events, then exactly one terminal line,
 | `stop` | `end_turn`, `tool_use`, `max_tokens`, `refusal` or `aborted`. The kernel runs tools only on `tool_use` |
 | `message` | the complete assistant message (§5), appended to the session byte for byte. `tool_use` blocks only with `stop: tool_use`: with any other stop they are stored but never answered. An empty `content` array appends nothing |
 | `usage` | `{input, output, cache_read, cache_write}` token counts, stored as the entry's `meta.usage` and sent in `turn_end` |
+| `stay` | optional; `true`: the provider waits for the next request on stdin instead of exiting (§1). An abort still stops it, and a `result` written after the abort is asked for does not stay |
 
 | Kernel rule | Effect |
 |---|---|
@@ -81,7 +85,7 @@ JSON lines on stdout: zero or more events, then exactly one terminal line,
 | a `result` after an `error` line | the `result` wins |
 
 Exit `0` if and only if a `result` line was written. The kernel reads only the
-lines, never the exit status.
+lines, never the exit status. A provider that stays exits `0` at EOF on stdin.
 
 ## 4. Errors
 
@@ -189,7 +193,7 @@ typed content blocks. Other providers translate down from it.
 | Input | Provider duty |
 |---|---|
 | a call the next user message does not answer | APIs want every call answered at once, so a provider answers each one itself, just in time, from what the request holds: a placeholder (`provider_describe_unanswered`) in the user message that follows, or in one of its own when an assistant message or the end follows. An API with native asynchronous tool results needs none: it sends the call open |
-| a `tool_result` whose call is not open | a late result: its call was answered by a placeholder, or branched or compacted away. Render it as something the API accepts with no `tool_use` before it: `anthropic` and `openai` send text (`provider_describe_job`) with the result's media after it |
+| a `tool_result` whose call is not open | a late result: its call was answered by a placeholder, or is before the last `reset`. Render it as something the API accepts with no `tool_use` before it: `anthropic` and `openai` send text (`provider_describe_job`) with the result's media after it |
 | `tool_result` facts (`name`, `status`, `ran`) | not sent as fields |
 | `tool_pending`, `job_result` (protocol 1) | a `tool_pending` as the placeholder it stood for; a `job_result` as a late result |
 | adjacent user messages | merge them if the API requires alternation |
@@ -266,10 +270,19 @@ for non-images) in the request only.
 
 ### claude-code
 
-`providers/claude-code.c`. Runs each request as one turn of the `claude` CLI
-(`claude -p`, found on `PATH`), on the user's Claude Code subscription; usage
-counts against the subscription's programmatic credit. It goes through the
-binary only and never touches Claude Code's credentials.
+`providers/claude-code.c`. Keeps one `claude` CLI process (`claude -p`, found on
+`PATH`) for as long as it stays, and runs each request as the next step of
+that one conversation, on the user's Claude Code subscription; usage counts
+against the subscription's programmatic credit. It goes through the binary only
+and never touches Claude Code's credentials. Every result stays (§1).
+
+Why one process: Claude Code continues a conversation on the API side (its
+`thread`, and its single cache breakpoint at the end of the request) only from
+its own previous request in the same process, and it moves its context
+reminders (the account's email) to whichever message it is answering. A new
+`claude` per request therefore writes the whole history to the prompt cache
+again on every step; one `claude` per session reads it from the cache and
+writes only what is new.
 
 | Input | Use |
 |---|---|
@@ -281,27 +294,28 @@ binary only and never touches Claude Code's credentials.
 | Behavior | Rule |
 |---|---|
 | isolation | Claude Code's own tools, CLAUDE.md files, memory, settings, skills, other MCP servers, compaction, advisor and session files are off: `--tools ""`, `--setting-sources ""`, `--disable-slash-commands`, `--strict-mcp-config`, `--no-session-persistence`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, `CLAUDE_CODE_DISABLE_ADVISOR_TOOL`, `DISABLE_COMPACT` |
-| environment | every `CLAUDE*` variable of a surrounding Claude Code session is removed, except `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY` |
-| tools | served to `claude` over MCP by the provider itself, run as `claude-code --mcp TOOLS` (server `akern`), so the model calls them as `mcp__akern__shell` and so on. `--permission-mode dontAsk` refuses every call (a `tools/call` that arrives anyway gets `Not run: akern runs its tools itself.`) and `--max-turns 1` ends the turn after the first response, so `tool_use` blocks come back unrun; the provider strips the prefix from them and adds it to earlier ones in the history |
-| history | rendered as `anthropic` renders it, media size limits included, and written as `--input-format stream-json` lines, every user message but the last with `shouldQuery: false`. `claude` appends an assistant message as soon as it reads it but queues user messages, so the provider writes past a queued one only after `claude` acknowledges it with a `result` line; no acknowledgement within 60 s fails with `claude did not take in the conversation` |
-| stream | `--include-partial-messages` carries the API's stream events (those of nested agents ignored), read by the same parser as `anthropic` (`providers/anthropic_messages.c`) |
-| failure | no `message_stop`: an `error` whose message is the turn's result text, its first error, or how `claude` exited; `kind` from `api_error_status` and the text as in `anthropic` (a message naming `/login` is `auth`). Never `invalid_block`: for a rejected image or document the result line carries Claude Code's own wording (`Image was too large…`), not the API's, so it names no block |
+| environment | every `CLAUDE*` variable of a surrounding Claude Code session is removed, except `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`. `MCP_TOOL_TIMEOUT` and `MAX_MCP_OUTPUT_TOKENS` are set high: a call waits for akern, and akern already bounds its results |
+| tools | an MCP server hosted by the provider over `claude`'s own stdin and stdout (`--mcp-config` with `"type":"sdk"`, `mcp_message` control requests), named `akern`, so the model calls them as `mcp__akern__shell` and so on; `--permission-mode dontAsk` with `--allowedTools` naming each of them. When the model calls tools, the provider ends the request with `stop: tool_use` (the prefix stripped, and added to earlier calls in the history) and holds each `tools/call` open; the next request's `tool_result` blocks answer them, matched by the `claudecode/toolUseId` Claude Code puts in each call's `_meta` |
+| start | `claude` starts on the first request, and again whenever the request cannot continue the one it has (below): the history is rendered as `anthropic` renders it, media size limits included, and written as `--input-format stream-json` lines, every user message but the last with `shouldQuery: false`. `claude` appends an assistant message as soon as it reads it but queues user messages, so the provider writes past a queued one only after `claude` acknowledges it with a `result` line; no acknowledgement within 60 s fails with `claude did not take in the conversation` |
+| continue | the request, rendered, must start with exactly what `claude` holds (the messages it was given and its replies, rendered), with the same model, system, tools, effort and `max_tokens`, and `claude` must still run. After a reply that called tools, the new part must be one user message of only their results, each text or a base64 image; after an `end_turn` reply, it is written as at the start, with no call answers in it. Anything else (a fork, a compaction, steering beside call results, a document in a result, a reply that stopped on `max_tokens`, after which Claude Code goes on by itself) starts `claude` again |
+| stream | `--include-partial-messages` carries the API's stream events (those of nested agents ignored), read by the same parser as `anthropic` (`providers/anthropic_messages.c`) up to the reply's `message_stop` |
+| failure | no `message_stop`: an `error` whose message is the turn's result text, its first error, or how `claude` exited; `kind` from `api_error_status` and the text as in `anthropic` (a message naming `/login` is `auth`). Never `invalid_block`: for a rejected image or document the result line carries Claude Code's own wording (`Image was too large…`), not the API's, so it names no block. The provider exits after an error, and the next request starts a new one |
 | abort | `SIGTERM` stops `claude`; the result is `aborted` |
+| end | EOF on stdin, or `SIGTERM` between requests, stops `claude`; the provider exits `0` |
 
 What it loses against `anthropic`:
 
 - the system prompt is not the request's alone: Claude Code adds an identity
   line, an environment block and context reminders such as the date and the
   account's email;
-- the prompt cache holds only the system prompt and tools, since those
-  reminders sit at the end of each request;
+- a new `claude` (the first request, and each start above) caches only the
+  system prompt and tools at first;
 - thinking arrives without its text, so nothing shows as `thinking_delta`
   (the signed blocks are still kept and replayed);
 - no server-side fallbacks, no `cache_control`, and no retries but Claude
   Code's own;
 - the model knows the tools by their `mcp__akern__` names;
-- each request starts a `claude` process, a second or two before the model is
-  called;
+- starting `claude` takes a second or two before the model is called;
 - an image or document the API rejects fails the run instead of being replaced
   in the session.
 

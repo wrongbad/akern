@@ -40,6 +40,10 @@ char *xstrdup(const char *s);
 void die(const char *fmt, ...);
 /* Writes every byte, retrying on EINTR; false on error. */
 bool write_all(int fd, span bytes);
+/* Appends a file's bytes; false, with errno, if it cannot be read. */
+bool read_file(const char *path, buf *out);
+/* Appends bytes as base64. */
+void buf_put_base64(buf *out, span bytes);
 
 /* A span over a C string. */
 span S(const char *s);

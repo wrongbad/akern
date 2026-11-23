@@ -28,8 +28,8 @@ def test_shutdown_closes_a_job_with_its_usual_result_not_its_raw_stdout(kernel, 
     program = f"trap 'cat {png} && exit 0' TERM\necho ready >&2\nsleep 30 & wait"
     run = kernel(tool("shell", command=program, wait=0),
                  during=signal_when((seen("tool_progress"), signal.SIGTERM)), code=130)
-    [(_, result)] = run.job_reports
-    assert (result["killed"], result["exit"], result["hidden"], result["total"]) == (True, 0, "binary output", len(TINY_PNG) + 6)
+    [(block, result)] = run.job_reports
+    assert (block["status"], result["exit"], result["hidden"], result["total"]) == ("killed", 0, "binary output", len(TINY_PNG) + 6)
     assert result["output"] == ""
 
 

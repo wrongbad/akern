@@ -1,6 +1,7 @@
 #include "bytes.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -157,6 +158,33 @@ void strv_free(strv *v)
         free(v->v[i]);
     free(v->v);
     *v = (strv){0};
+}
+
+bool read_file(const char *path, buf *out)
+{
+    char chunk[65536];
+    ssize_t n = 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    while (fd >= 0 && ((n = read(fd, chunk, sizeof chunk)) > 0 || (n < 0 && errno == EINTR)))
+        buf_put(out, chunk, n > 0 ? (size_t)n : 0);
+    int error = errno;
+    if (fd >= 0)
+        close(fd);
+    errno = error;
+    return fd >= 0 && n == 0;
+}
+
+void buf_put_base64(buf *out, span bytes)
+{
+    static const char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const unsigned char *p = (const unsigned char *)bytes.p;
+    for (size_t i = 0; i < bytes.n; i += 3)
+    {
+        unsigned long v = (unsigned long)p[i] << 16 | (i + 1 < bytes.n ? p[i + 1] << 8 : 0) |
+                          (i + 2 < bytes.n ? p[i + 2] : 0);
+        for (size_t k = 0; k < 4; k++)
+            buf_putc(out, i + k <= bytes.n ? digits[v >> (18 - 6 * k) & 63] : '=');
+    }
 }
 
 bool write_all(int fd, span bytes)

@@ -19,11 +19,18 @@ void anthropic_render(json_buf *out, json messages);
 /* The rendered block an API error message names, and its reason. */
 bool anthropic_blame(const char *api_message, block_at *at, const char **reason);
 
+/* Forgets the previous stream, for a provider that reads several. */
+void anthropic_begin_stream(void);
 /* Reads one stream event, emitting events; false for an error event. */
 bool anthropic_read_event(json event);
 /* True once the stream has ended with message_stop. */
 bool anthropic_is_complete(void);
-/* Writes the result line from what the stream gave, and exits. */
+/* The result's stop for a stream that was not aborted. */
+const char *anthropic_stop(void);
+/* The result message's content, as a JSON array, from what the stream gave. */
+void anthropic_put_content(json_buf *content, bool aborted);
+/* Writes the result line from what the stream gave, and exits, or, after provider_stay,
+   returns. */
 void anthropic_emit_result(bool aborted);
 
 #endif

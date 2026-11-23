@@ -20,18 +20,23 @@ typedef struct {
 
 #define NO_BLOCK ((block_at){-1, -1, -1})
 
-/* Traps SIGTERM and reads the request from stdin; exits if invalid. */
+/* Traps SIGTERM and reads the request, one line of stdin; exits if it is missing or invalid. */
 json provider_read_request(void);
+/* For a provider that stays: traps SIGTERM and reads the next request line. False at EOF or
+   once SIGTERM has arrived; exits if the line is invalid. */
+bool provider_next_request(json *request);
+/* From now on a result line says the provider stays for the next request, and does not exit. */
+void provider_stay(void);
 /* True once SIGTERM has arrived. */
 bool provider_was_aborted(void);
 
 /* Writes one event line, formatted as by json_printf. */
 void provider_emit(const char *fmt, ...);
-/* True once any event line has been written. */
+/* True once any event line has been written for the current request. */
 bool provider_has_emitted(void);
 /* Writes one model line; a limit of 0 is left out. */
 void provider_emit_model(const char *id, long long context, long long max_output);
-/* Writes the result line and exits. */
+/* Writes the result line and exits, or, after provider_stay, returns. */
 void provider_emit_result(const char *stop, json content, provider_usage usage);
 /* Writes the error line and exits. */
 void provider_emit_error(const char *kind, const char *message, long status);
