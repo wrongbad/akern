@@ -41,6 +41,7 @@ picks up where its parent is; everything else passes through unchanged.
 | `AKERN_HOME` | the home in use, as resolved above |
 | `AKERN_MODEL` | the model in effect |
 | `AKERN_RE_LIMIT` | the value read, minus 1 |
+| `AKERN_SESSION` | the session path, as given: a sub-agent's session goes in `$AKERN_SESSION.d/agents/` ([§5](#sub-agents)) |
 
 ## 2. Arguments
 
@@ -56,7 +57,7 @@ or bad value, or a `-P` without `key=`: usage on stderr, exit 2.
 | Argument | Default | Meaning |
 |---|---|---|
 | `-p`, `--print` | off | print mode: stdout per [§4](#print-mode); exits after it has run once and is quiescent, without waiting for EOF |
-| `-s`, `--session path` | `$TMPDIR/akern-session-XXXXXX` | session file. Created if missing; locked through `path.owner`. Owned by another kernel: exit 2 |
+| `-s`, `--session path` | `$TMPDIR/akern-session-XXXXXX` | session file. Created if missing, with its directory; locked through `path.owner`. Owned by another kernel: exit 2 |
 | `-m`, `--model provider/model` | `$AKERN_MODEL` | the model ([settings](#settings)). The kernel runs `$AKERN_HOME/providers/<provider>`, else `$AKERN_HOME/system/providers/<provider>`; the request's `model` is the part after `/` |
 | `-S`, `--system path` | the system-prompt program's output ([below](#system-prompt)) | system prompt file, read verbatim once at startup; the system-prompt program is not run. Unreadable: exit 2 |
 | `-P`, `--param key=value` | | repeatable. Provider params ([settings](#settings)). `value` is sent as JSON when it is a JSON value (`max_tokens=64` is the number 64, `thinking={"type":"adaptive"}` an object), else as a string (`effort=high`) |
@@ -783,15 +784,15 @@ names its session with `-s`; without one, it is anonymous. Its files follow the
 same layout, next to that path:
 
 ```
-s.jsonl                          parent; the call's tool_use holds the child's command
-s.jsonl.d/calls/tu_1.out         the sub-agent's -p answer, as the job's stdout
-agents/rename.jsonl              the sub-agent's whole conversation (-s agents/rename.jsonl)
-agents/rename.jsonl.d/…          its own calls' output files
+s.jsonl                            parent; the call's tool_use holds the child's command
+s.jsonl.d/calls/tu_1.out           the sub-agent's -p answer, as the job's stdout
+s.jsonl.d/agents/rename.jsonl      the sub-agent's whole conversation (-s "$AKERN_SESSION.d/agents/rename.jsonl")
+s.jsonl.d/agents/rename.jsonl.d/…  its own calls' output files
 ```
 
 | Step | What happens |
 |---|---|
-| start | `shell {"command":"akern -p -s agents/rename.jsonl '…'","wait":0,"eof":false}`; the directory must exist. `wait: 0` lets the parent keep working; without it, the parent waits for the answer until a message arrives |
+| start | `shell {"command":"akern -p -s \"$AKERN_SESSION.d/agents/rename.jsonl\" '…'","wait":0,"eof":false}`; the directory is created. Beside the parent's session, nothing lands in the project. `wait: 0` lets the parent keep working; without it, the parent waits for the answer until a message arrives |
 | model | the parent's: `AKERN_MODEL` is inherited, unless the command passes `-m` |
 | run | the child appends to its own file only; the parent sees it as a job (`tail` the child's file to watch) |
 | steer | `job {"id":"<call id>","stdin":"…\n"}` to the child's stdin: a plain line is a `turn` item for it ([delivery modes](#delivery-modes)), `{"type":"send","when":"now","content":"…"}` interrupts it. Each level steers the one below the same way |

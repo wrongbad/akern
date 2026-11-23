@@ -64,8 +64,8 @@ static bool looks_like_text(span s)
 
 static int open_output(const char *path, char **error)
 {
-    for (char *p = path ? strchr(path + 1, '/') : NULL; p; p = strchr(p + 1, '/'))
-        *p = 0, mkdir(path, 0755), *p = '/';
+    if (path)
+        make_parent_dirs(path);
     int fd = path ? open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644) : -1;
     if (path && fd < 0)
         *error = strerror(errno);

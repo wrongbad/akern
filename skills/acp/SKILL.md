@@ -20,7 +20,7 @@ akern-agent [-a AGENT_COMMAND] [-s SESSION.jsonl] [-C DIR] [-m MODEL] [-o ID=VAL
 | Flag | Meaning |
 |---|---|
 | `-a COMMAND` | the command that starts the agent, run with `sh -c`. Needed for a new session; a continued one uses the command its file recorded |
-| `-s SESSION.jsonl` | its session: created if missing, continued if it exists. Without `-s`, a throwaway file. Its directory must exist. One `akern-agent` at a time per file: a second exits 2 |
+| `-s SESSION.jsonl` | its session: created if missing (its directory too), continued if it exists. Put it beside your own session, `"$AKERN_SESSION.d/agents/NAME.jsonl"`, never in the project. Without `-s`, a throwaway file. One `akern-agent` at a time per file: a second exits 2 |
 | `-C DIR` | its working directory; default, yours (a continued session keeps its own) |
 | `-m MODEL` | the agent's model, by its id or name, as the agent lists them; a wrong one exits 2 and lists the choices |
 | `-o ID=VALUE` | any other option the agent offers (`-o mode=plan`, `-o effort=low`), by id or category; a wrong one exits 2 and lists what there is |
@@ -61,15 +61,14 @@ the same session with `--allow`.
 Delegate and keep working (`eof: false` keeps its stdin open for steering):
 
 ```json
-{"command": "mkdir -p agents && akern-agent -a 'my-agent --acp' --allow -s agents/tests.jsonl 'Run the test suite, fix any failing tests, and reply with a list of what you changed and why.'",
+{"command": "akern-agent -a 'my-agent --acp' --allow -s \"$AKERN_SESSION.d/agents/tests.jsonl\" 'Run the test suite, fix any failing tests, and reply with a list of what you changed and why.'",
  "wait": 0, "eof": false}
 ```
 
-A long or quote-heavy task: write it to a file first, as with `akern -p`:
+A long or quote-heavy task: pass it on stdin, as with `akern -p`:
 
 ```json
-{"command": "cat > agents/review.task.md", "stdin": "Review src/parser.c for …\n"}
-{"command": "akern-agent -a 'my-agent --acp' -s agents/review.jsonl \"$(cat agents/review.task.md)\"", "wait": 0}
+{"command": "akern-agent -a 'my-agent --acp' -s \"$AKERN_SESSION.d/agents/review.jsonl\" \"$(cat)\"", "stdin": "Review src/parser.c for …\n", "wait": 0}
 ```
 
 Steer it (`job` with `stdin`, each line ending in a newline):
@@ -87,7 +86,7 @@ Continue it later, with what it already knows: the same `-s` and a new prompt;
 a question it ended with:
 
 ```json
-{"command": "akern-agent --allow -s agents/tests.jsonl 'Yes, delete build/. Carry on.'"}
+{"command": "akern-agent --allow -s \"$AKERN_SESSION.d/agents/tests.jsonl\" 'Yes, delete build/. Carry on.'"}
 ```
 
 Watch its progress: the session file holds every protocol line,
@@ -95,9 +94,9 @@ Watch its progress: the session file holds every protocol line,
 text so far:
 
 ```
-jq -rj 'select(.in.params.update.sessionUpdate == "agent_message_chunk") | .in.params.update.content.text // empty' agents/tests.jsonl
+jq -rj 'select(.in.params.update.sessionUpdate == "agent_message_chunk") | .in.params.update.content.text // empty' "$AKERN_SESSION.d/agents/tests.jsonl"
 ```
 
 Its state (`running`, `requires_action`, `idle`):
-`jq -c 'select(.in.params.update.sessionUpdate == "state_update") | .in.params.update' agents/tests.jsonl | tail -n 1`.
-The agent's own log is `agents/tests.jsonl.stderr`.
+`jq -c 'select(.in.params.update.sessionUpdate == "state_update") | .in.params.update' "$AKERN_SESSION.d/agents/tests.jsonl" | tail -n 1`.
+The agent's own log is `"$AKERN_SESSION.d/agents/tests.jsonl.stderr"`.

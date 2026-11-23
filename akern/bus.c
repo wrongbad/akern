@@ -55,6 +55,7 @@ bool bus_open_session(bus *b)
     session *s = &b->session;
     s->id_rng = (uint64_t)get_unix_seconds() ^ ((uint64_t)getpid() << 32) ^
                 (uint64_t)(get_monotonic_seconds() * 1e9);
+    make_parent_dirs(b->config->session_path);
     s->fd = open(b->config->session_path, O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (s->fd < 0)
         die("%s: %s", b->config->session_path, strerror(errno));

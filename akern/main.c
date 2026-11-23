@@ -189,6 +189,11 @@ static void export_for_children(const config *cfg)
     snprintf(below, sizeof below, "%d", cfg->recursion_limit - 1);
     setenv("AKERN_RE_LIMIT", below, 1);
     setenv("AKERN_HOME", cfg->home_dir, 1);
+    setenv(
+        "AKERN_SESSION",
+        cfg->session_path,
+        1
+    ); /* a sub-agent's goes in $AKERN_SESSION.d/agents/ */
 }
 
 /* The actors in the order they see each line: the loop (exit), input (status), calls (what the

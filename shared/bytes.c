@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 void *xmalloc(size_t n)
@@ -158,6 +159,18 @@ void strv_free(strv *v)
         free(v->v[i]);
     free(v->v);
     *v = (strv){0};
+}
+
+void make_parent_dirs(const char *path)
+{
+    char *dir = xstrdup(path);
+    for (char *p = strchr(dir + 1, '/'); p; p = strchr(p + 1, '/'))
+    {
+        *p = 0;
+        mkdir(dir, 0755);
+        *p = '/';
+    }
+    free(dir);
 }
 
 bool read_file(const char *path, buf *out)

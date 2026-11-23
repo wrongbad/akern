@@ -517,7 +517,7 @@ def test_v2_an_edit_is_a_change_with_a_git_patch(acp2, tmp_path):
 def test_v2_a_sub_agent_is_a_child_session_read_from_its_file(acp2, tmp_path):
     client = acp2()
     session = client.call("session/new", {"cwd": str(tmp_path)})["sessionId"]
-    say(client, session, tool("shell", command="mkdir -p agents && akern -p -s agents/helper.jsonl hello", wait=0))
+    say(client, session, tool("shell", command='akern -p -s "$AKERN_SESSION.d/agents/helper.jsonl" hello', wait=0))
     child = f"{session}/agents/helper"
     updates = client.until(lambda updates: any(u.get("state", {}).get("state") == "idle"
                                                for u in of(updates, session, "subagent_update")))

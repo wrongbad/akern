@@ -15,7 +15,7 @@ akern -p [-s SESSION.jsonl] [-m PROVIDER/MODEL] [-S SYSTEM.md] [-P KEY=VALUE]...
 | Flag | Meaning |
 |---|---|
 | `-p` | print mode: its stdout is the final answer of each run, and it exits once it is done, without waiting for its stdin to end. Always pass it |
-| `-s SESSION.jsonl` | its conversation, one JSON entry per line; created if missing, continued if it exists. Without `-s`, a throwaway file. Its directory must exist. One `akern` at a time per file: a second exits 2 |
+| `-s SESSION.jsonl` | its conversation, one JSON entry per line; created if missing (its directory too), continued if it exists. Put it beside your own session, `"$AKERN_SESSION.d/agents/NAME.jsonl"`, never in the project. Without `-s`, a throwaway file. One `akern` at a time per file: a second exits 2 |
 | `-m PROVIDER/MODEL` | another model; default, yours (`$AKERN_MODEL`). List a provider's models with `$AKERN_HOME/system/providers/NAME --models`; the providers are the files in `$AKERN_HOME/providers` and `$AKERN_HOME/system/providers` |
 | `-S SYSTEM.md` | its system prompt, read from the file, instead of the usual one (how to work in akern, the skills, the project's `AGENTS.md`), so include what it needs of those |
 | `-P KEY=VALUE` | a provider parameter, repeatable: `-P effort=low` for a cheaper run, `-P max_tokens=4000` |
@@ -39,15 +39,14 @@ While it runs, each line on its stdin is a message:
 Delegate and keep working (`eof: false` keeps its stdin open for steering):
 
 ```json
-{"command": "mkdir -p agents && akern -p -s agents/tests.jsonl 'Run the test suite in this repository, fix any failing tests, and reply with a list of what you changed and why.'",
+{"command": "akern -p -s \"$AKERN_SESSION.d/agents/tests.jsonl\" 'Run the test suite in this repository, fix any failing tests, and reply with a list of what you changed and why.'",
  "wait": 0, "eof": false}
 ```
 
-A long or quote-heavy task: write it to a file first, then pass it whole:
+A long or quote-heavy task: pass it on stdin, whole, with no quoting:
 
 ```json
-{"command": "cat > agents/review.task.md", "stdin": "Review src/parser.c for …\n(any text, quotes included)\n"}
-{"command": "akern -p -s agents/review.jsonl \"$(cat agents/review.task.md)\"", "wait": 0}
+{"command": "akern -p -s \"$AKERN_SESSION.d/agents/review.jsonl\" \"$(cat)\"", "stdin": "Review src/parser.c for …\n(any text, quotes included)\n", "wait": 0}
 ```
 
 A quick question you wait for (no `wait`: the call returns its answer):
@@ -60,8 +59,8 @@ Several at once: put the calls in one reply, each with its own `-s`; each
 answer arrives as its own job result.
 
 ```json
-{"command": "akern -p -s agents/a.jsonl 'Summarize docs/a.md in five bullets.'", "wait": 0}
-{"command": "akern -p -s agents/b.jsonl 'Summarize docs/b.md in five bullets.'", "wait": 0}
+{"command": "akern -p -s \"$AKERN_SESSION.d/agents/a.jsonl\" 'Summarize docs/a.md in five bullets.'", "wait": 0}
+{"command": "akern -p -s \"$AKERN_SESSION.d/agents/b.jsonl\" 'Summarize docs/b.md in five bullets.'", "wait": 0}
 ```
 
 Steer it (`job` with `stdin`, each line ending in a newline):
@@ -76,10 +75,10 @@ sub-agents and jobs, and its result still arrives. Wait for it a while:
 `{"id": "<its call id>", "wait": 120}`.
 
 Watch its progress: its session file grows one line per message, e.g.
-`tail -n 3 agents/tests.jsonl | cut -c1-400`, or its text so far with
-`jq -r 'select(.type=="message") | .message.content[]? | select(.type=="text") | .text' agents/tests.jsonl`.
+`tail -n 3 "$AKERN_SESSION.d/agents/tests.jsonl" | cut -c1-400`, or its text so far with
+`jq -r 'select(.type=="message") | .message.content[]? | select(.type=="text") | .text' "$AKERN_SESSION.d/agents/tests.jsonl"`.
 
 Continue it later with what it already knows: run `akern -p` again with the
 same `-s` and a new prompt. That is also how you answer a sub-agent that ends
 with a question (before deleting or pushing something, say) instead of a
-result: `akern -p -s agents/tests.jsonl 'Yes, delete build/. Carry on.'`.
+result: `akern -p -s "$AKERN_SESSION.d/agents/tests.jsonl" 'Yes, delete build/. Carry on.'`.

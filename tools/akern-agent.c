@@ -208,8 +208,12 @@ static bool open_session_file(void)
             quit("cannot create a session file in %s: %s", tmp ? tmp : "/tmp", strerror(errno));
         g.file = p;
     }
-    else if ((g.log = open(g.file, O_RDWR | O_CREAT | O_APPEND, 0644)) < 0)
-        quit("cannot open %s: %s", g.file, strerror(errno));
+    else
+    {
+        make_parent_dirs(g.file);
+        if ((g.log = open(g.file, O_RDWR | O_CREAT | O_APPEND, 0644)) < 0)
+            quit("cannot open %s: %s", g.file, strerror(errno));
+    }
     fcntl(g.log, F_SETFD, FD_CLOEXEC);
     struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
     if (fcntl(g.log, F_SETLK, &lock) < 0)

@@ -188,7 +188,8 @@ class Run:
         return [(b, _shell_or_text(b["content"][0]["text"])) for b in late]
 
     def violations(self):
-        sessions = [self.session, *self.session.parent.glob("agents/*.jsonl")]
+        sessions = [self.session, *self.session.parent.glob("agents/*.jsonl"),
+                    *self.session.parent.glob(f"{self.session.name}.d/agents/*.jsonl")]
         found = [f"{s.name}: {v}" for s in sessions for v in session_violations(_read_jsonl(s, skip_invalid=True))]
         if not self.printing:
             found += [f"{self.events_path.name}: {v}" for v in event_violations(self.events)]

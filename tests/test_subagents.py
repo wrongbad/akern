@@ -12,6 +12,14 @@ def test_a_sub_agent_job_answers_on_stdout_in_the_session_its_parent_names(kerne
     assert result["output"] == "echo: say hi\n"
 
 
+def test_a_sub_agent_session_beside_its_parents_needs_no_directory_and_leaves_the_project_alone(kernel, tmp_path):
+    run = kernel(tool("shell", command='akern -p -s "$AKERN_SESSION.d/agents/hi.jsonl" \'say hi\'', wait=0))
+    [(_, result)] = run.job_reports
+    assert result["output"] == "echo: say hi\n"
+    assert (run.session.parent / f"{run.session.name}.d" / "agents" / "hi.jsonl").is_file()
+    assert not list((tmp_path / "agents").iterdir())
+
+
 def test_a_line_written_to_a_sub_agents_stdin_is_answered_while_its_call_runs(kernel, tmp_path):
     gate = tmp_path / "gate"
     sub_agent = Run(tmp_path / "agents" / "steer.jsonl", printing=True)
@@ -37,10 +45,10 @@ def test_recursion_limit_counts_down_per_nested_kernel(kernel):
     assert "recursion limit reached" in run.output
 
 
-def test_children_get_only_the_model_and_the_recursion_limit_from_the_kernel(kernel, home):
+def test_children_get_the_home_model_recursion_limit_and_session_from_the_kernel(kernel, home):
     home.mock("env | grep ^AKERN_ | sort >&2")
     run = kernel(shell("env | grep ^AKERN_ | sort"), env=home.env)
-    inherited = f"AKERN_HOME={home.dir}\nAKERN_MODEL=mock/echo\nAKERN_RE_LIMIT=3"
+    inherited = f"AKERN_HOME={home.dir}\nAKERN_MODEL=mock/echo\nAKERN_RE_LIMIT=3\nAKERN_SESSION={run.session}"
     assert {n["message"] for n in run.events_of("notice")} == set(inherited.splitlines())
     out = f"AKERN_OUT={run.session}.d/calls/{run.calls[0]}.out"
     assert run.shell_result["output"] == "\n".join(sorted([*inherited.splitlines(), out])) + "\n"

@@ -40,6 +40,8 @@ char *xstrdup(const char *s);
 void die(const char *fmt, ...);
 /* Writes every byte, retrying on EINTR; false on error. */
 bool write_all(int fd, span bytes);
+/* Creates the directories a file's path names, as mkdir -p does for its dirname. */
+void make_parent_dirs(const char *path);
 /* Appends a file's bytes; false, with errno, if it cannot be read. */
 bool read_file(const char *path, buf *out);
 /* Appends bytes as base64. */

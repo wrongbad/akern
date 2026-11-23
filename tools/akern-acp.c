@@ -742,8 +742,9 @@ static void shell_words(const char *s, strv *words)
     buf_free(&word);
 }
 
-/* The session file of the sub-agent a shell command starts: `akern … -s FILE` (akern.md §5). */
-static char *subagent_file(json command)
+/* The session file of the sub-agent a shell command starts: `akern … -s FILE` (akern.md §5),
+   with $AKERN_SESSION, as the command's shell would, the session of the akern that runs it. */
+static char *subagent_file(json command, const char *session_path)
 {
     buf text = {0};
     json_decode(command, &text);
@@ -781,14 +782,25 @@ static char *subagent_file(json command)
     }
     if (file && !*file)
         free(file), file = NULL;
+    const char *names[] = {"$AKERN_SESSION", "${AKERN_SESSION}"};
+    for (size_t i = 0; file && i < LEN(names); i++)
+        if (!strncmp(file, names[i], strlen(names[i])))
+        {
+            buf expanded = {0};
+            buf_printf(&expanded, "%s%s", session_path, file + strlen(names[i]));
+            free(file);
+            file = buf_cstr(&expanded);
+            break;
+        }
     strv_free(&words);
     buf_free(&text);
     return file;
 }
 
 /* A sub-agent's child session, announced on its parent's: its id is the session's and its file's
-   path, so a sub-agent continued by a later call is the same child. */
-static child *start_child(session *s, const char *parent, const char *file)
+   path (within the parent's .d directory, or the working directory), so a sub-agent continued by
+   a later call is the same child. */
+static child *start_child(session *s, const char *parent, const char *parent_path, const char *file)
 {
     buf path = {0};
     if (file[0] != '/' && s->cwd)
@@ -802,8 +814,10 @@ static child *start_child(session *s, const char *parent, const char *file)
     {
         k = xcalloc(1, sizeof *k);
         k->path = xstrdup(buf_cstr(&path));
-        size_t cwd = s->cwd ? strlen(s->cwd) : 0;
-        const char *rel = cwd && !strncmp(k->path, s->cwd, cwd) && k->path[cwd] == '/' ? k->path + cwd + 1 : file;
+        size_t cwd = s->cwd ? strlen(s->cwd) : 0, own = strlen(parent_path);
+        const char *rel = !strncmp(k->path, parent_path, own) && !strncmp(k->path + own, ".d/", 3) ? k->path + own + 3
+                          : cwd && !strncmp(k->path, s->cwd, cwd) && k->path[cwd] == '/' ? k->path + cwd + 1
+                                                                                          : file;
         size_t n = strlen(rel);
         if (n > 6 && !strcmp(rel + n - 6, ".jsonl"))
             n -= 6;
@@ -1160,8 +1174,8 @@ static void on_child_entry(void *ctx, span line)
         if (!json_eq(json_get(block, "type"), "tool_use"))
             continue;
         json name = json_get(block, "name"), input = json_get(block, "input");
-        char *file = json_eq(name, "shell") ? subagent_file(json_get(input, "command")) : NULL;
-        child *grandchild = file ? start_child(s, k->id, file) : NULL;
+        char *file = json_eq(name, "shell") ? subagent_file(json_get(input, "command"), k->path) : NULL;
+        child *grandchild = file ? start_child(s, k->id, k->path, file) : NULL;
         call *c = push_call(&k->calls, &k->ncalls, &k->capcalls, json_get(block, "id"), name);
         c->child = grandchild;
         open_call2(s, k->id, c, name, input);
@@ -1782,8 +1796,8 @@ static void on_event2(session *s, json e)
     {
         json name = json_get(e, "name"), input = json_get(e, "input");
         pid_t pid = (pid_t)json_get_num(json_get(e, "pid"), 0);
-        char *file = json_eq(name, "shell") && pid ? subagent_file(json_get(input, "command")) : NULL;
-        child *k = file ? start_child(s, s->id, file) : NULL;
+        char *file = json_eq(name, "shell") && pid ? subagent_file(json_get(input, "command"), s->path) : NULL;
+        child *k = file ? start_child(s, s->id, s->path, file) : NULL;
         call *c = push_call(&s->calls, &s->ncalls, &s->capcalls, json_get(e, "call"), name);
         c->run = (long long)json_get_num(json_get(e, "run"), 0);
         c->pid = pid;
